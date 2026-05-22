@@ -78,7 +78,7 @@ def find_sheet_containing_keyword(file, keywords):
         try:
             df_test = pd.read_excel(file, sheet_name=sheet, header=None, nrows=20)
             df_str = df_test.astype(str).values.flatten()
-            if any(keyword in cell for cell in df_str for keyword in keywords):
+            if any(keyword.lower() in cell.lower() for cell in df_str for keyword in keywords):
                 return sheet
         except Exception:
             continue
@@ -97,8 +97,7 @@ def load_and_clean(file, keywords, sheet=None):
             if sheet is None:
                 return pd.DataFrame()
         
-        # Essayer de lire la feuille
-        file.seek(0)
+        # Lire une seule fois
         df_raw = pd.read_excel(file, sheet_name=sheet, header=None)
         
         if df_raw.empty:
@@ -108,7 +107,7 @@ def load_and_clean(file, keywords, sheet=None):
         header_idx = None
         for idx, row in df_raw.iterrows():
             row_str = [str(val).strip() for val in row.values]
-            if any(keyword in cell for cell in row_str for keyword in keywords):
+            if any(keyword.lower() in cell.lower() for cell in row_str for keyword in keywords):
                 header_idx = idx
                 break
 
@@ -122,7 +121,7 @@ def load_and_clean(file, keywords, sheet=None):
         if header_idx is None:
             header_idx = 0
 
-        file.seek(0)
+        # Relire à partir de la ligne d'en-tête détectée
         df = pd.read_excel(file, sheet_name=sheet, skiprows=header_idx)
         df.columns = [str(c).strip() for c in df.columns]
         df = df.dropna(subset=[df.columns[0]]) if not df.empty else df
@@ -143,24 +142,27 @@ def process_consolidation(files):
     """Consolide les données de tous les fichiers uploadés."""
     all_data = {"MISSIONS": [], "POINTS": [], "ANOMALIES": [], "PLANS": []}
     
+    if not files:
+        return all_data
+    
     for f in files:
         # Missions
-        df_missions = load_and_clean(f, ["N° Mission", "Mission"])
+        df_missions = load_and_clean(f, ["N° Mission", "Mission", "mission"])
         if not df_missions.empty:
             all_data["MISSIONS"].append(df_missions)
         
         # Points de contrôle
-        df_points = load_and_clean(f, ["ID Point", "Point de Contrôle"])
+        df_points = load_and_clean(f, ["ID Point", "Point de Contrôle", "point", "Point"])
         if not df_points.empty:
             all_data["POINTS"].append(df_points)
         
         # Anomalies
-        df_anomalies = load_and_clean(f, ["ID Anomalie", "Anomalie"])
+        df_anomalies = load_and_clean(f, ["ID Anomalie", "Anomalie", "anomalie"])
         if not df_anomalies.empty:
             all_data["ANOMALIES"].append(df_anomalies)
         
         # Plans d'action
-        df_plans = load_and_clean(f, ["ID Plan", "Plan"])
+        df_plans = load_and_clean(f, ["ID Plan", "Plan", "plan"])
         if not df_plans.empty:
             all_data["PLANS"].append(df_plans)
 
@@ -396,7 +398,29 @@ if source_mode == "📂 Fichiers Excel (Import local)":
     if not uploaded_files:
         st.info("👋 Déposez les fichiers de contrôle des filiales pour initialiser le tableau de bord.")
         st.stop()
-    data = process_consolidation(uploaded_files)
+    
+    st.write("🔍 **Fichiers en traitement :**")
+    for f in uploaded_files:
+        st.write(f"- {f.name} ({f.size} bytes)")
+    
+    with st.spinner("Chargement et consolidation des données..."):
+        data = process_consolidation(uploaded_files)
+    
+    # Afficher un résumé
+    st.divider()
+    st.write("📊 **Résumé du chargement :**")
+    col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+    col_s1.metric("Missions", len(data["MISSIONS"]))
+    col_s2.metric("Anomalies", len(data["ANOMALIES"]))
+    col_s3.metric("Points", len(data["POINTS"]))
+    col_s4.metric("Plans", len(data["PLANS"]))
+    st.divider()
+    
+    # Vérifier si les données sont vides
+    if data["ANOMALIES"].empty and data["MISSIONS"].empty and data["POINTS"].empty and data["PLANS"].empty:
+        st.error("❌ Aucune donnée n'a pu être extraite. Vérifiez le format de vos fichiers.")
+        st.stop()
+    
 else:
     if not SUPABASE_OK:
         st.error("Connexion Supabase non disponible. Vérifiez vos secrets.")
