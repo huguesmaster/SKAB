@@ -58,27 +58,18 @@ def force_match_supabase_columns(df_source, table_name, engine_pg):
     try:
         inspector = inspect(engine_pg)
         if table_name in inspector.get_table_names():
-            # Récupère les colonnes réelles de la table Supabase
             db_columns = [col['name'] for col in inspector.get_columns(table_name)]
             
-            # 1. Ajoute dans notre DataFrame les colonnes de la base qui manquent (remplies par du vide)
+            # S'assurer que le DataFrame a les colonnes minimales nécessaires
             for col in db_columns:
                 if col not in df_source.columns:
                     df_source[col] = None
                     
-            # 2. On ne garde STRICTEMENT que les colonnes qui existent dans la base de données
+            # Conserver uniquement les colonnes reconnues par PostgreSQL
             df_source = df_source[db_columns]
-    except Exception as e:
+    except Exception:
         pass
     return df_source
-
-def get_safe_len(series, col_name):
-    clean = series.dropna()
-    if not clean.empty:
-        max_c = int(clean.apply(lambda x: len(str(x))).max())
-    else:
-        max_c = 0
-    return min(max(max_c, len(str(col_name))) + 3, 50)
 
 
 # --- 3. ARCHITECTURE DES ONGLETS SKAB ---
@@ -98,7 +89,7 @@ with tab_chef:
     df_anom = load_table_from_supabase("anomalies")
     
     if df_anom.empty:
-        st.warning("💡 La table 'anomalies' n'est pas encore initialisée ou est vide. Rendez-vous dans l'onglet 'Espace Contrôleurs' pour injecter un premier fichier Excel.")
+        st.warning("💡 La table 'anomalies' n'est pas encore initialisée ou est vide. Rendez-vous dans l'onglet 'Espace Contrôleurs' pour injecter un premier fichier Excel en mode 'Initialiser'.")
     else:
         df_anom.columns = [str(c).lower().strip() for c in df_anom.columns]
         
@@ -211,7 +202,7 @@ with tab_chef:
 # ==============================================================================
 with tab_terrain:
     st.title("📥 Portail d'Injection Automatique pour Agents de Terrain")
-    st.subheader("Zéro mail, zéro ressaisie — Synchronisation directe avec Supabase")
+    st.subheader("Zéro mail, zero ressaisie — Synchronisation directe avec Supabase")
 
     # MÉTHODE 1 : INJECTION EXCEL
     st.markdown("#### 📁 Méthode 1 : Charger un fichier Excel individuel (ex: Jean-Pierre MVA)")
@@ -250,16 +241,16 @@ with tab_terrain:
                 
                 if_exists_param = "replace" if "Initialiser" in mode_ecriture else "append"
 
-                # 🛡️ SÉCURITÉ DE CARTOGRAPHIE DES COLONNES SI MODE APPEND
+                # Sécurité d'alignement appliquée uniquement si on ajoute à une table existante
                 if if_exists_param == "append":
                     df_to_inject = force_match_supabase_columns(df_to_inject, "anomalies", engine)
 
-                st.write(f"📝 **Aperçu final des données alignées pour Supabase ({df_to_inject.shape[0]} lignes) :**")
+                st.write(f"📝 **Aperçu des données prêtes à être envoyées ({df_to_inject.shape[0]} lignes) :**")
                 st.dataframe(df_to_inject, hide_index=True)
 
                 if st.button("🚀 Synchroniser le fichier avec Supabase", type="primary"):
                     df_to_inject.to_sql("anomalies", con=engine, if_exists=if_exists_param, index=False)
-                    st.success(f"🔥 Opération réussie ! Les données Excel ont été poussées sans conflit structurel.")
+                    st.success(f"🔥 Opération réussie ! Structure et données Excel synchronisées dans Supabase.")
                     st.balloons()
                     
         except Exception as err:
@@ -267,7 +258,7 @@ with tab_terrain:
 
     st.divider()
 
-    # MÉTHODE 2 : FORMULAIRE WEB DIRECT BRINDÉ
+    # MÉTHODE 2 : FORMULAIRE WEB DIRECT
     st.markdown("#### 📝 Méthode 2 : Formulaire de Saisie Directe à la volée (Sans fichier)")
     with st.form("form_saisie_directe"):
         c1, c2, c3 = st.columns(3)
@@ -304,11 +295,11 @@ with tab_terrain:
                 df_form = pd.DataFrame(raw_form_data)
                 df_form.columns = [clean_column_name(c) for c in df_form.columns]
                 
-                # 🛡️ Aligne aussi le formulaire sur la structure exacte de Supabase
+                # Aligne le formulaire sur la structure PostgreSQL
                 df_form = force_match_supabase_columns(df_form, "anomalies", engine)
                 
                 try:
                     df_form.to_sql("anomalies", con=engine, if_exists="append", index=False)
                     st.success(f"🔥 Enregistrement validé ! L'anomalie **{f_id}** est intégrée dans Supabase.")
                 except Exception as ex:
-                    st.error(f"⚠️ Échec de l'insertion : {ex}")
+                    st.error(f"⚠️ Échec de l'insertion. Assurez-vous d'avoir recréé la table proprement via la méthode Excel (Option Initialiser) avant d'utiliser le formulaire.")
