@@ -4,7 +4,7 @@ import plotly.express as px
 import io
 import re
 from datetime import datetime
-from sqlalchemy import create_engine, text, inspect
+from sqlalchemy import create_engine, text
 
 # --- CONFIGURATION DE LA PAGE ---
 st.set_page_config(
@@ -34,7 +34,55 @@ except Exception as e:
     st.stop()
 
 
-# --- 2. FONCTIONS DE NETTOYAGE ET CHARGEMENT ---
+# --- 2. SÉCURITÉ RESSOURCE : CRÉATION DU SCHÉMA SI INEXISTANT (DDL EXPLICITE) ---
+def init_database_schema(engine_pg):
+    """Exécute des requêtes SQL natives pour garantir la création des tables dans Supabase"""
+    queries = [
+        """
+        CREATE TABLE IF NOT EXISTS table_anomalies (
+            id_anomalie TEXT, date_detection TEXT, site_entite TEXT, pays TEXT,
+            type_domaine TEXT, niveau_criticite TEXT, description TEXT, cause_racine_identifiee TEXT,
+            impact_estime_fcfa NUMERIC, responsable_traitement TEXT, statut TEXT, date_cloture TEXT,
+            lien_plan_action TEXT, n_mission_rattachee TEXT, controleur TEXT,
+            meta_source_file TEXT, meta_import_date TEXT
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS table_missions (
+            n_mission TEXT, date_debut TEXT, date_fin TEXT, domaine TEXT, type_controle TEXT,
+            pays_entite TEXT, site_agence TEXT, responsable_site TEXT, statut_mission TEXT,
+            nb_points_oui NUMERIC, nb_points_non NUMERIC, nb_points_n_a NUMERIC,
+            taux_conformite NUMERIC, nb_anomalies NUMERIC, commentaire_general TEXT,
+            meta_source_file TEXT, meta_import_date TEXT
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS table_points_controle (
+            id_point TEXT, n_mission TEXT, date TEXT, domaine TEXT, section TEXT, code_point TEXT,
+            libelle_point_de_controle TEXT, resultat TEXT, observation_constat TEXT,
+            piece_justificative TEXT, criticite_si_non TEXT, action_immediate TEXT, controleur TEXT,
+            meta_source_file TEXT, meta_import_date TEXT
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS table_plans_action (
+            id_plan TEXT, id_anomalie_liee TEXT, action_corrective_a_mener TEXT, responsable TEXT,
+            echeance TEXT, date_realisation TEXT, statut TEXT, avancement TEXT, commentaire_suivi TEXT,
+            piece_de_preuve TEXT, controleur TEXT, meta_source_file TEXT, meta_import_date TEXT
+        );
+        """
+    ]
+    with engine_pg.connect() as schema_conn:
+        transaction = schema_conn.begin()
+        try:
+            for q in queries:
+                schema_conn.execute(text(q))
+            transaction.commit()
+        except Exception as schema_err:
+            transaction.rollback()
+            st.error(f"⚠️ Impossible d'initialiser le schéma SQL : {schema_err}")
+
+
 def clean_column_name(col):
     """Nettoie proprement les en-têtes pour éviter les erreurs de syntaxe PostgreSQL"""
     s = str(col).strip().lower()
@@ -44,7 +92,7 @@ def clean_column_name(col):
     return s.strip("_")
 
 def load_table(table_name):
-    """Charge une table SQL sous forme de DataFrame, retourne un DF vide si la table n'existe pas"""
+    """Charge une table SQL sous forme de DataFrame, retourne un DF vide si absente"""
     try:
         return pd.DataFrame(conn.query(f"SELECT * FROM {table_name};", ttl="2s"))
     except Exception:
@@ -68,8 +116,8 @@ tabs = st.tabs([
 with tabs[0]:
     st.header("🗂️ Centralisation et Structuration des rapports terrains")
     st.markdown("""
-        Déposez ici le classeur Excel d'un contrôleur. Si les tables n'existent pas dans votre console **Supabase**, 
-        **le système les créera automatiquement** avec les bonnes colonnes.
+        Déposez ici le classeur Excel d'un contrôleur. Le système va forcer la création des tables manquantes 
+        dans votre console **Supabase** avant de pousser les lignes de données.
     """)
     
     src_file = st.file_uploader("Sélectionnez le fichier Excel à intégrer (.xlsx) :", type="xlsx")
@@ -91,16 +139,27 @@ with tabs[0]:
             mode_import = st.radio(
                 "Stratégie de stockage dans Supabase :",
                 [
-                    "Ajouter les données à la suite de l'historique existant (Crée la table si elle n'existe pas)",
-                    "⚠️ Vider la base et réinitialiser toutes les tables à neuf (Écrase ou Recrée proprement)"
+                    "Ajouter les données à la suite de l'historique existant",
+                    "⚠️ Vider la base et réinitialiser toutes les tables à neuf (Purge complète)"
                 ]
             )
             
             if st.button("🚀 Lancer la synchronisation globale des tables", type="primary", use_container_width=True):
                 
-                # Inspection des tables actuellement existantes sur Supabase
-                inspector = inspect(engine)
-                existing_tables = inspector.get_table_names()
+                # 🛡️ APPEL SÉCURITÉ CRITIQUE : Matérialise les tables si absentes de Supabase
+                init_database_schema(engine)
+                
+                # Si l'utilisateur demande une réinitialisation complète
+                if "Vider" in mode_import:
+                    with engine.connect() as clear_conn:
+                        trans = clear_conn.begin()
+                        try:
+                            for db_table in target_sheets.values():
+                                clear_conn.execute(text(f"TRUNCATE TABLE {db_table};"))
+                            trans.commit()
+                            st.warning("🗑️ Base de données vidée (Contenu purgé). Injection des données neuves...")
+                        except Exception as tr_ex:
+                            trans.rollback()
                 
                 progress_bar = st.progress(0)
                 success_count = 0
@@ -125,31 +184,28 @@ with tabs[0]:
                             df_clean = df_clean.dropna(subset=[first_col])
                             df_clean = df_clean[~df_clean[first_col].astype(str).str.contains("une_anomalie|id_anomalie|exemple", na=False, case=False)]
                             
-                            # Métadonnées d'audit
+                            # Ajout des métadonnées
                             df_clean['meta_source_file'] = src_file.name
                             df_clean['meta_import_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             
-                            # --- GESTION DYNAMIQUE DE LA STRUCTURE SQL ---
-                            if "Vider" in mode_import:
-                                # Si l'utilisateur demande un reset complet, on force "replace" pour générer/écraser proprement
-                                df_clean.to_sql(db_table, con=engine, if_exists="replace", index=False)
-                                st.caption(f"⚡ Table `{db_table}` recréée à neuf et initialisée ({df_clean.shape[0]} lignes).")
-                            else:
-                                # Mode normal (Append)
-                                if db_table in existing_tables:
-                                    df_clean.to_sql(db_table, con=engine, if_exists="append", index=False)
-                                    st.caption(f"✅ Table `{db_table}` mise à jour ({df_clean.shape[0]} lignes insérées).")
-                                else:
-                                    # Si la table n'existe pas du tout sur Supabase, on force la création automatique initiale via "replace"
-                                    df_clean.to_sql(db_table, con=engine, if_exists="replace", index=False)
-                                    st.caption(f"✨ Table `{db_table}` détectée absente : créée automatiquement avec succès ({df_clean.shape[0]} lignes).")
+                            # Aligner les colonnes du DataFrame sur le schéma de la table SQL créée pour éviter tout écart
+                            query_cols = conn.query(f"SELECT * FROM {db_table} LIMIT 0;")
+                            db_cols = list(query_cols.columns)
                             
+                            for c in db_cols:
+                                if c not in df_clean.columns:
+                                    df_clean[c] = None
+                            df_clean = df_clean[db_cols]
+                            
+                            # Injection sécurisée par lot (Append forcé puisque la structure existe désormais)
+                            df_clean.to_sql(db_table, con=engine, if_exists="append", index=False)
+                            st.caption(f"✅ Données enregistrées dans `{db_table}` ({df_clean.shape[0]} lignes).")
                             success_count += 1
                     
                     progress_bar.progress((idx + 1) / len(target_sheets))
                 
                 if success_count > 0:
-                    st.success(f"🎉 Opération validée. Les tables ont été matérialisées et alimentées sur Supabase !")
+                    st.success(f"🎉 Opération validée. Les tables ont été créées et alimentées avec succès sur Supabase !")
                     st.balloons()
                     
         except Exception as ex:
@@ -163,15 +219,13 @@ with tabs[1]:
     st.header("📊 Consolidation Automatique du Groupe")
     
     df_anom = load_table("table_anomalies")
-    df_miss = load_table("table_missions")
     
     if df_anom.empty:
-        st.warning("💡 La base SQL ne contient actuellement aucune donnée. Veuillez injecter un classeur Excel dans le premier onglet pour l'initialiser.")
+        st.warning("💡 La base SQL ne contient actuellement aucune donnée. Veuillez injecter un premier classeur Excel pour l'initialiser.")
     else:
         df_anom.columns = [c.lower() for c in df_anom.columns]
         
         c_site = next((c for c in df_anom.columns if 'site' in c or 'entite' in c), df_anom.columns[2])
-        c_date = next((c for c in df_anom.columns if 'date' in c), df_anom.columns[1])
         c_impact = next((c for c in df_anom.columns if 'impact' in c), None)
         c_crit = next((c for c in df_anom.columns if 'crit' in c), None)
         c_pays = next((c for c in df_anom.columns if 'pays' in c), None)
@@ -198,22 +252,6 @@ with tabs[1]:
             st.metric("Total Écarts en Base", df_anom.shape[0])
 
         st.divider()
-        
-        g1, g2 = st.columns(2)
-        with g1:
-            st.markdown("**🔍 Répartition des Risques par Criticité & Site**")
-            if c_crit and c_site:
-                fig = px.bar(df_anom, x=c_site, color=c_crit, barmode='stack')
-                fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10))
-                st.plotly_chart(fig, use_container_width=True)
-        with g2:
-            st.markdown("**📂 Origine des fichiers sources intégrés**")
-            if 'meta_source_file' in df_anom.columns:
-                df_src_summary = df_anom.groupby('meta_source_file').size().reset_index(name="Nombre d'anomalies")
-                fig2 = px.pie(df_src_summary, values="Nombre d'anomalies", names='meta_source_file', hole=0.4)
-                fig2.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10))
-                st.plotly_chart(fig2, use_container_width=True)
-
         st.markdown("### 📋 Registre Général de Contrôle")
         st.dataframe(df_anom, hide_index=True, use_container_width=True)
 
@@ -238,6 +276,6 @@ with tabs[2]:
                         st.success(f"🎯 Requête exécutée. {df_query_res.shape[0]} lignes renvoyées.")
                         st.dataframe(df_query_res, use_container_width=True)
                     else:
-                        st.success("✅ Requête exécutée avec succès (aucune ligne renvoyée).")
+                        st.success("✅ Requête exécutée avec succès.")
             except Exception as sql_err:
                 st.error(f"❌ Erreur SQL : {sql_err}")
