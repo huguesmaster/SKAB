@@ -4,7 +4,7 @@ import plotly.express as px
 import io
 import re
 from datetime import datetime
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, inspect
 
 # --- CONFIGURATION DE LA PAGE ---
 st.set_page_config(
@@ -44,7 +44,7 @@ def clean_column_name(col):
     return s.strip("_")
 
 def load_table(table_name):
-    """Charge une table SQL sous forme de DataFrame"""
+    """Charge une table SQL sous forme de DataFrame, retourne un DF vide si la table n'existe pas"""
     try:
         return pd.DataFrame(conn.query(f"SELECT * FROM {table_name};", ttl="2s"))
     except Exception:
@@ -63,13 +63,13 @@ tabs = st.tabs([
 
 
 # ==============================================================================
-# ONGLET 1 : INJECTION CENTRALISÉE DES FEUILLES EXCEL
+# ONGLET 1 : INJECTION CENTRALISÉE AVEC CRÉATION AUTOMATIQUE DES TABLES
 # ==============================================================================
 with tabs[0]:
     st.header("🗂️ Centralisation et Structuration des rapports terrains")
     st.markdown("""
-        Déposez ici le classeur Excel d'un contrôleur. Le système va extraire, nettoyer et synchroniser 
-        automatiquement les quatre composants métiers vers des tables SQL distinctes dans **Supabase**.
+        Déposez ici le classeur Excel d'un contrôleur. Si les tables n'existent pas dans votre console **Supabase**, 
+        **le système les créera automatiquement** avec les bonnes colonnes.
     """)
     
     src_file = st.file_uploader("Sélectionnez le fichier Excel à intégrer (.xlsx) :", type="xlsx")
@@ -91,29 +91,17 @@ with tabs[0]:
             mode_import = st.radio(
                 "Stratégie de stockage dans Supabase :",
                 [
-                    "Ajouter les données à la suite de l'historique existant (Recommandé)",
-                    "⚠️ Vider la base et réinitialiser toutes les tables à neuf (Purge complète)"
+                    "Ajouter les données à la suite de l'historique existant (Crée la table si elle n'existe pas)",
+                    "⚠️ Vider la base et réinitialiser toutes les tables à neuf (Écrase ou Recrée proprement)"
                 ]
             )
             
             if st.button("🚀 Lancer la synchronisation globale des tables", type="primary", use_container_width=True):
                 
-                # 🛡️ FIX SÉCURITÉ : Si l'utilisateur demande une réinitialisation, on applique un TRUNCATE natif 
-                # plutôt qu'un drop/replace de Pandas sujet aux blocages de relations PostgreSQL.
-                if "Vider" in mode_import:
-                    with engine.connect() as t_conn:
-                        trans = t_conn.begin()
-                        try:
-                            for db_table in target_sheets.values():
-                                # TRUNCATE vide le contenu de façon sûre et propre sans casser le schéma
-                                t_conn.execute(text(f"TRUNCATE TABLE {db_table} RESTART IDENTITY CASCADE;"))
-                            trans.commit()
-                            st.warning("🗑️ Base de données vidée avec succès. Injection des nouvelles structures en cours...")
-                        except Exception as truncate_ex:
-                            trans.rollback()
-                            # Si les tables n'existent pas encore du tout en base de données, on ignore l'erreur
-                            pass
-
+                # Inspection des tables actuellement existantes sur Supabase
+                inspector = inspect(engine)
+                existing_tables = inspector.get_table_names()
+                
                 progress_bar = st.progress(0)
                 success_count = 0
                 
@@ -137,18 +125,31 @@ with tabs[0]:
                             df_clean = df_clean.dropna(subset=[first_col])
                             df_clean = df_clean[~df_clean[first_col].astype(str).str.contains("une_anomalie|id_anomalie|exemple", na=False, case=False)]
                             
+                            # Métadonnées d'audit
                             df_clean['meta_source_file'] = src_file.name
                             df_clean['meta_import_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             
-                            # On force l'écriture en mode "append" car le nettoyage a déjà été opéré en amont par le TRUNCATE
-                            df_clean.to_sql(db_table, con=engine, if_exists="append", index=False)
-                            st.caption(f"✅ Table `{db_table}` mise à jour ({df_clean.shape[0]} lignes insérées).")
+                            # --- GESTION DYNAMIQUE DE LA STRUCTURE SQL ---
+                            if "Vider" in mode_import:
+                                # Si l'utilisateur demande un reset complet, on force "replace" pour générer/écraser proprement
+                                df_clean.to_sql(db_table, con=engine, if_exists="replace", index=False)
+                                st.caption(f"⚡ Table `{db_table}` recréée à neuf et initialisée ({df_clean.shape[0]} lignes).")
+                            else:
+                                # Mode normal (Append)
+                                if db_table in existing_tables:
+                                    df_clean.to_sql(db_table, con=engine, if_exists="append", index=False)
+                                    st.caption(f"✅ Table `{db_table}` mise à jour ({df_clean.shape[0]} lignes insérées).")
+                                else:
+                                    # Si la table n'existe pas du tout sur Supabase, on force la création automatique initiale via "replace"
+                                    df_clean.to_sql(db_table, con=engine, if_exists="replace", index=False)
+                                    st.caption(f"✨ Table `{db_table}` détectée absente : créée automatiquement avec succès ({df_clean.shape[0]} lignes).")
+                            
                             success_count += 1
                     
                     progress_bar.progress((idx + 1) / len(target_sheets))
                 
                 if success_count > 0:
-                    st.success(f"🎉 Opération validée. Traitement achevé pour {success_count} composants métier.")
+                    st.success(f"🎉 Opération validée. Les tables ont été matérialisées et alimentées sur Supabase !")
                     st.balloons()
                     
         except Exception as ex:
@@ -165,7 +166,7 @@ with tabs[1]:
     df_miss = load_table("table_missions")
     
     if df_anom.empty:
-        st.warning("💡 La base SQL ne contient actuellement aucune donnée consolidée.")
+        st.warning("💡 La base SQL ne contient actuellement aucune donnée. Veuillez injecter un classeur Excel dans le premier onglet pour l'initialiser.")
     else:
         df_anom.columns = [c.lower() for c in df_anom.columns]
         
@@ -216,29 +217,6 @@ with tabs[1]:
         st.markdown("### 📋 Registre Général de Contrôle")
         st.dataframe(df_anom, hide_index=True, use_container_width=True)
 
-        st.divider()
-        st.subheader("📤 Reporting de Direction")
-        if st.button("🏗️ Générer le Rapport Souverain pour le DAF", type="primary", use_container_width=True):
-            out_buf = io.BytesIO()
-            with pd.ExcelWriter(out_buf, engine='xlsxwriter') as wr:
-                pd.DataFrame({
-                    "SYSTÈME INTEGRÉ DE CONTRÔLE INTERNE": ["Destinataire", "Auteur", "Généré le", "Périmètre Extrait"],
-                    "MÉTADONNÉES GROUPE SKAB": ["M. Élie DIGNOU (DAF)", "Chef de Département Contrôle Interne", datetime.now().strftime("%d/%m/%Y à %H:%M"), pays_selectionne]
-                }).to_excel(wr, sheet_name="MÉTADONNÉES", index=False)
-                
-                df_anom.to_excel(wr, sheet_name="CONSO_ANOMALIES", index=False)
-                if not df_miss.empty:
-                    df_miss.to_excel(wr, sheet_name="CONSO_MISSIONS", index=False)
-                    
-            st.success("🎉 Le fichier d'audit scellé a été mis en mémoire avec succès.")
-            st.download_button(
-                label="💾 Télécharger le Livrable Consolidé DAF (.xlsx)",
-                data=out_buf.getvalue(),
-                file_name=f"SKAB_AUDIT_DAF_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
-
 
 # ==============================================================================
 # ONGLET 3 : REQUÊTEUR SQL NATIVE
@@ -246,16 +224,8 @@ with tabs[1]:
 with tabs[2]:
     st.header("🛢️ Console SQL & États Réels des Tables Supabase")
     
-    with st.expander("📚 Dictionnaire des tables SQL prêtes à l'interrogation", expanded=True):
-        st.markdown("""
-            * **`table_anomalies`** : Registre complet des écarts relevés sur le terrain.
-            * **`table_missions`** : Journal général de planification des mandats de contrôle.
-            * **`table_points_controle`** : Lignes unitaires d'évaluation du catalogue de conformité.
-            * **`table_plans_action`** : Dispositifs de remédiation et d'atténuation des risques.
-        """)
-
     st.subheader("🖋️ Saisir ou coller une requête SQL")
-    ex_query = "SELECT site_entite, COUNT(*) as volume, SUM(impact_estime_fcfa) as risque_financier \nFROM table_anomalies \nGROUP BY site_entite \nORDER BY risque_financier DESC;"
+    ex_query = "SELECT table_name FROM information_schema.tables WHERE table_schema='public';"
     user_sql = st.text_area("Requête PostgreSQL :", value=ex_query, height=140)
     
     if st.button("⚡ Exécuter la requête SQL sur Supabase", type="primary"):
@@ -268,6 +238,6 @@ with tabs[2]:
                         st.success(f"🎯 Requête exécutée. {df_query_res.shape[0]} lignes renvoyées.")
                         st.dataframe(df_query_res, use_container_width=True)
                     else:
-                        st.success("✅ Requête de mise à jour/action exécutée avec succès.")
+                        st.success("✅ Requête exécutée avec succès (aucune ligne renvoyée).")
             except Exception as sql_err:
                 st.error(f"❌ Erreur SQL : {sql_err}")
