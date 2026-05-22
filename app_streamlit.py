@@ -4,302 +4,277 @@ import plotly.express as px
 import io
 import re
 from datetime import datetime
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, text
 
-# --- CONFIGURATION SÉCURISÉE DE LA PAGE ---
+# --- CONFIGURATION DE LA PAGE ---
 st.set_page_config(
-    page_title="SKAB - Système Intégré de Contrôle Interne (Supabase)",
+    page_title="SKAB - Console Supervision Contrôle Interne",
     page_icon="🛡️",
     layout="wide"
 )
 
+# Style CSS personnalisé pour épurer l'interface
 st.markdown("""
     <style>
-    [data-testid="stMetricValue"] { font-size: 28px; }
+    [data-testid="stMetricValue"] { font-size: 26px; }
     .stAlert { margin-top: 10px; }
-    .stTabs [data-baseweb="tab-list"] { gap: 24px; }
-    .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; font-weight: bold; font-size: 16px; }
-    .stException { display: none; }
+    .stTabs [data-baseweb="tab-list"] { gap: 20px; }
+    .stTabs [data-baseweb="tab"] { height: 45px; font-weight: bold; font-size: 15px; }
     </style>
 """, unsafe_allow_html=True)
 
 
-# --- 1. SÉCURISATION DES IDENTIFIANTS VIA STREAMLIT SECRETS ---
+# --- 1. CONNEXION SÉCURISÉE À LA BASE DE DONNÉES ---
 try:
     conn = st.connection("supabase", type="sql")
     creds = st.secrets["connections"]["supabase"]
     db_url = f"postgresql://{creds['username']}:{creds['password']}@{creds['host']}:{creds['port']}/{creds['database']}"
     engine = create_engine(db_url)
 except Exception as e:
-    st.error("🔒 Erreur de configuration : Les identifiants Supabase sont manquants ou incorrects dans vos Streamlit Secrets.")
+    st.error("🔒 Erreur de connexion : Les identifiants Supabase sont introuvables ou erronés dans les Secrets.")
     st.stop()
 
 
-# --- 2. FONCTIONS OUTILS ---
+# --- 2. FONCTIONS DE NETTOYAGE ET CHARGEMENT ---
 def clean_column_name(col):
-    """Nettoie proprement les en-têtes pour PostgreSQL (pas d'accents, espaces ou caractères spéciaux doublés)"""
+    """Nettoie proprement les en-têtes pour éviter les erreurs de syntaxe PostgreSQL"""
     s = str(col).strip().lower()
     s = s.replace("é", "e").replace("è", "e").replace("ê", "e").replace("à", "a").replace("ç", "c")
-    s = re.sub(r"[/\-()°’']", " ", s)  # Remplace les séparateurs par des espaces
-    s = re.sub(r"\s+", "_", s)         # Remplace les espaces multiples par un seul underscore
+    s = re.sub(r"[/\-()°’'%]", " ", s)  # Remplace les caractères spéciaux par des espaces
+    s = re.sub(r"\s+", "_", s)         # Remplace les espaces multiples par un seul un_derscore
     return s.strip("_")
 
-def load_table_from_supabase(table_name):
-    """Charge une table depuis Supabase avec gestion de l'absence de table"""
+def load_table(table_name):
+    """Charge une table SQL de manière sécurisée sous forme de DataFrame"""
     try:
-        query = f"SELECT * FROM {table_name};"
-        df = conn.query(query, ttl="10s")
-        return pd.DataFrame(df)
+        return pd.DataFrame(conn.query(f"SELECT * FROM {table_name};", ttl="2s"))
     except Exception:
         return pd.DataFrame()
 
-def force_match_supabase_columns(df_source, table_name, engine_pg):
-    """🛡️ Aligne parfaitement le DataFrame sur la structure réelle de Supabase pour éviter le ValueError"""
-    try:
-        inspector = inspect(engine_pg)
-        if table_name in inspector.get_table_names():
-            db_columns = [col['name'] for col in inspector.get_columns(table_name)]
-            
-            # S'assurer que le DataFrame a les colonnes minimales nécessaires
-            for col in db_columns:
-                if col not in df_source.columns:
-                    df_source[col] = None
-                    
-            # Conserver uniquement les colonnes reconnues par PostgreSQL
-            df_source = df_source[db_columns]
-    except Exception:
-        pass
-    return df_source
 
+# --- 3. ARCHITECTURE DE L'APPLICATION (MODE CHEF DE DÉPARTEMENT UNIQUE) ---
+st.title("🛡️ SKAB NUTRITION — Console de Supervision du Contrôle Interne")
+st.caption("Espace d'administration et d'analyse de données - Réservé au Chef de Département")
 
-# --- 3. ARCHITECTURE DES ONGLETS SKAB ---
-tab_chef, tab_terrain = st.tabs([
-    "📊 ESPACE CHEF DE DÉPARTEMENT (Supervision & Conso)", 
-    "📥 ESPACE CONTRÔLEURS TERRAINS (Saisie Directe & Injection)"
+tabs = st.tabs([
+    "📥 Injection des Livrables", 
+    "📊 Tableaux de Bord", 
+    "🔍 Requêteur SQL & Base de Données"
 ])
 
 
 # ==============================================================================
-# ONGLETS 1 : INTERFACE DE SUPERVISION (CHEF DE DÉPARTEMENT)
+# ONGLET 1 : INJECTION CENTRALISÉE DES FEUILLES EXCEL
 # ==============================================================================
-with tab_chef:
-    st.title("🛡️ Direction du Contrôle Interne — Groupe SKAB")
-    st.subheader("Suivi de l'intégrité et consolidation automatique")
+with tabs[0]:
+    st.header("🗂️ Centralisation et Structuration des rapports terrains")
+    st.markdown("""
+        Déposez ici le classeur Excel d'un contrôleur. Le système va extraire, nettoyer et synchroniser 
+        automatiquement les quatre composants métiers vers des tables SQL distinctes dans **Supabase**.
+    """)
     
-    df_anom = load_table_from_supabase("anomalies")
+    src_file = st.file_uploader("Sélectionnez le fichier Excel à intégrer (.xlsx) :", type="xlsx")
+    
+    if src_file:
+        # Liste des onglets clés à extraire obligatoirement
+        target_sheets = {
+            "ANOMALIES": "table_anomalies",
+            "MES_MISSIONS": "table_missions",
+            "POINTS_CONTROLE": "table_points_controle",
+            "PLANS_ACTION": "table_plans_action"
+        }
+        
+        try:
+            excel_obj = pd.ExcelFile(src_file)
+            available_sheets = excel_obj.sheet_names
+            
+            st.info(f"📁 Fichier détecté : `{src_file.name}` (Onglets présents : {', '.join(available_sheets)})")
+            
+            # Options d'écriture globale
+            mode_import = st.radio(
+                "Stratégie de stockage dans Supabase :",
+                [
+                    "Ajouter les données à la suite de l'historique existant (Recommandé)",
+                    "Vider la base et réinitialiser toutes les tables à neuf (Attention : Écrase l'existant)"
+                ]
+            )
+            if_exists_behavior = "replace" if "Vider" in mode_import else "append"
+            
+            if st.button("🚀 Lancer la synchronisation globale des tables", type="primary", use_container_width=True):
+                progress_bar = st.progress(0)
+                success_count = 0
+                
+                for idx, (sheet_name, db_table) in enumerate(target_sheets.items()):
+                    if sheet_name in available_sheets:
+                        # 1. Lecture dynamique pour repérer l'en-tête réel (saute les lignes de titres graphiques)
+                        df_raw = pd.read_excel(src_file, sheet_name=sheet_name, header=None)
+                        header_idx = 0
+                        
+                        # Recherche d'un mot-clé pivot pour caler l'en-tête
+                        for r_idx, row in df_raw.iterrows():
+                            row_str = " ".join([str(v) for v in row.values])
+                            if any(k in row_str for k in ["ID", "N°", "Date", "Statut"]):
+                                header_idx = r_idx
+                                break
+                        
+                        # 2. Rechargement propre de l'onglet métier
+                        df_clean = pd.read_excel(src_file, sheet_name=sheet_name, skiprows=header_idx)
+                        
+                        if not df_clean.empty:
+                            # 3. Nettoyage strict des noms de colonnes pour PostgreSQL
+                            df_clean.columns = [clean_column_name(c) for c in df_clean.columns]
+                            
+                            # Enlever les lignes de consignes ou vides
+                            first_col = df_clean.columns[0]
+                            df_clean = df_clean.dropna(subset=[first_col])
+                            df_clean = df_clean[~df_clean[first_col].astype(str).str.contains("une_anomalie|id_anomalie|exemple", na=False, case=False)]
+                            
+                            # Métadonnées de traçabilité
+                            df_clean['meta_source_file'] = src_file.name
+                            df_clean['meta_import_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            
+                            # 4. Écriture directe dans la table dédiée
+                            df_clean.to_sql(db_table, con=engine, if_exists=if_exists_behavior, index=False)
+                            st.caption(f"✅ Table `{db_table}` synchronisée avec succès ({df_clean.shape[0]} lignes).")
+                            success_count += 1
+                    
+                    progress_bar.progress((idx + 1) / len(target_sheets))
+                
+                if success_count > 0:
+                    st.success(f"🔥 Parfait ! Les {success_count} feuilles du rapport ont été converties en tables SQL relationnelles complètes.")
+                    st.balloons()
+                else:
+                    st.warning("⚠️ Aucun onglet correspondant aux structures standards (`ANOMALIES`, `MES_MISSIONS`, etc.) n'a pu être traité.")
+                    
+        except Exception as ex:
+            st.error(f"❌ Erreur critique lors du traitement du package Excel : {ex}")
+
+
+# ==============================================================================
+# ONGLET 2 : TABLEAUX DE BORD ET CONSOLIDATION DAF
+# ==============================================================================
+with tabs[1]:
+    st.header("📊 Consolidation Automatique du Groupe")
+    
+    # Chargement des bases clés pour les indicateurs
+    df_anom = load_table("table_anomalies")
+    df_miss = load_table("table_missions")
     
     if df_anom.empty:
-        st.warning("💡 La table 'anomalies' n'est pas encore initialisée ou est vide. Rendez-vous dans l'onglet 'Espace Contrôleurs' pour injecter un premier fichier Excel en mode 'Initialiser'.")
+        st.warning("💡 La base SQL est actuellement vide. Veuillez injecter un premier classeur Excel de référence pour activer les indicateurs.")
     else:
-        df_anom.columns = [str(c).lower().strip() for c in df_anom.columns]
+        # Normalisation cosmétique rapide des colonnes lues
+        df_anom.columns = [c.lower() for c in df_anom.columns]
         
-        # Mappings dynamiques souples
-        c_site = next((c for c in df_anom.columns if 'site' in c or 'entite' in c or 'agence' in c), df_anom.columns[2])
+        # Mappings automatiques souples pour l'analyse visuelle
+        c_site = next((c for c in df_anom.columns if 'site' in c or 'entite' in c), df_anom.columns[2])
         c_date = next((c for c in df_anom.columns if 'date' in c), df_anom.columns[1])
         c_impact = next((c for c in df_anom.columns if 'impact' in c), None)
         c_crit = next((c for c in df_anom.columns if 'crit' in c), None)
-        c_domaine = next((c for c in df_anom.columns if 'domaine' in c or 'type' in c), None)
         c_pays = next((c for c in df_anom.columns if 'pays' in c), None)
         c_statut = next((c for c in df_anom.columns if 'statut' in c), None)
 
-        # Barre latérale des filtres
-        st.sidebar.header("🎛️ Filtres de Supervision")
+        # Filtre dynamique supérieur
+        liste_pays = ["Toutes les filiales"] + list(df_anom[c_pays].dropna().unique()) if c_pays else ["Toutes les filiales"]
+        pays_selectionne = st.selectbox("🌍 Périmètre d'analyse géographique :", liste_pays)
         
-        liste_agences = ["Toutes les agences"] + list(df_anom[c_site].dropna().unique())
-        agence_choisie = st.sidebar.selectbox("🏢 Filtrer par Agence / Site :", liste_agences)
-        if agence_choisie != "Toutes les agences":
-            df_anom = df_anom[df_anom[c_site] == agence_choisie]
-            
-        df_anom['date_format_systeme'] = pd.to_datetime(df_anom[c_date], errors='coerce')
-        df_anom = df_anom.dropna(subset=['date_format_systeme'])
-        
-        type_periode = st.sidebar.radio("Fréquence temporelle :", ["Toutes les dates", "Mensuelle", "Trimestrielle", "Annuelle"])
-        
-        if type_periode == "Mensuelle":
-            df_anom['mois_annee'] = df_anom['date_format_systeme'].dt.to_period('M').astype(str)
-            choix_mois = st.sidebar.selectbox("Sélectionner le Mois :", sorted(df_anom['mois_annee'].unique(), reverse=True))
-            df_anom = df_anom[df_anom['mois_annee'] == choix_mois]
-        elif type_periode == "Trimestrielle":
-            df_anom['trim_annee'] = df_anom['date_format_systeme'].dt.to_period('Q').astype(str)
-            choix_trim = st.sidebar.selectbox("Sélectionner le Trimestre :", sorted(df_anom['trim_annee'].unique(), reverse=True))
-            df_anom = df_anom[df_anom['trim_annee'] == choix_trim]
-        elif type_periode == "Annuelle":
-            df_anom['annee_systeme'] = df_anom['date_format_systeme'].dt.year
-            choix_annee = st.sidebar.selectbox("Sélectionner l'Année :", sorted(df_anom['annee_systeme'].unique(), reverse=True))
-            df_anom = df_anom[df_anom['annee_systeme'] == choix_annee]
+        if pays_selectionne != "Toutes les filiales" and c_pays:
+            df_anom = df_anom[df_anom[c_pays] == pays_selectionne]
 
-        # KPIs
-        st.markdown("### 📊 Indicateurs de Performance Métier (Données Supabase)")
+        # Ligne de KPIs de haut niveau
+        st.markdown("### 📌 Indicateurs de Vulnérabilité Majeure")
         k1, k2, k3, k4 = st.columns(4)
-        
         with k1:
             impact_total = pd.to_numeric(df_anom[c_impact], errors='coerce').fillna(0).sum() if c_impact else 0
-            st.metric("Risque Financier Cumulé", f"{impact_total:,.0f} FCFA")
+            st.metric("Risque Financier Global", f"{impact_total:,.0f} FCFA")
         with k2:
-            nb_critiques = df_anom[df_anom[c_crit].astype(str).str.contains('critique|🔴', na=False, case=False)].shape[0] if c_crit else 0
-            st.metric("Anomalies Critiques", nb_critiques, delta="Action Requise" if nb_critiques > 0 else None, delta_color="inverse")
+            nb_crit = df_anom[df_anom[c_crit].astype(str).str.contains('critique|🔴', na=False, case=False)].shape[0] if c_crit else 0
+            st.metric("Alertes Critiques Rouges", nb_crit, delta="Action Immédiate" if nb_crit > 0 else None, delta_color="inverse")
         with k3:
-            nb_encours = df_anom[df_anom[c_statut].astype(str).str.upper().str.contains("EN COURS", na=False)].shape[0] if c_statut else 0
-            st.metric("Missions / Alertes [EN COURS]", nb_encours)
+            nb_encours = df_anom[df_anom[c_statut].astype(str).str.upper().str.contains("EN COURS|OUVERT", na=False)].shape[0] if c_statut else 0
+            st.metric("Anomalies non résolues", nb_encours)
         with k4:
-            st.metric("Total des Écarts en Base", df_anom.shape[0])
+            st.metric("Total Écarts répertoriés", df_anom.shape[0])
 
         st.divider()
-
-        # Graphiques
+        
+        # Dataviz
         g1, g2 = st.columns(2)
         with g1:
-            st.markdown("**🔍 Répartition des Risques par Domaine d'Activité**")
-            if c_domaine:
-                fig = px.bar(df_anom, x=c_domaine, color=c_crit if c_crit else None, barmode='group')
-                fig.update_layout(height=320, margin=dict(l=0, r=0, t=10, b=0), xaxis_title=None, yaxis_title="Volume")
+            st.markdown("**🔍 Répartition des Risques par Criticité & Site**")
+            if c_crit and c_site:
+                fig = px.bar(df_anom, x=c_site, color=c_crit, barmode='stack')
+                fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10))
                 st.plotly_chart(fig, use_container_width=True)
         with g2:
-            st.markdown("**🌍 Provenance des Alertes par Filiale**")
-            if c_pays:
-                df_p = df_anom.groupby(c_pays).size().reset_index(name="Volume")
-                fig2 = px.pie(df_p, values="Volume", names=c_pays, hole=.4)
-                fig2.update_layout(height=320, margin=dict(l=0, r=0, t=10, b=0))
+            st.markdown("**📂 Origine des fichiers sources intégrés**")
+            if 'meta_source_file' in df_anom.columns:
+                df_src_summary = df_anom.groupby('meta_source_file').size().reset_index(name="Nombre d'anomalies")
+                fig2 = px.pie(df_src_summary, values="Nombre d'anomalies", names='meta_source_file', hole=0.4)
+                fig2.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10))
                 st.plotly_chart(fig2, use_container_width=True)
 
-        st.divider()
-        st.markdown("### ⏳ Focus Exclusif sur les Incidents au Statut ''EN COURS''")
-        if c_statut:
-            df_uniquement_encours = df_anom[df_anom[c_statut].astype(str).str.upper().str.contains("EN COURS", na=False)]
-            if not df_uniquement_encours.empty:
-                st.dataframe(df_uniquement_encours, hide_index=True, use_container_width=True)
-            else:
-                st.success("✅ Intégrité Parfaite : Aucune anomalie n'est au statut 'EN COURS'.")
-
-        st.markdown("### 📋 Registre Global des Données")
+        st.markdown("### 📋 Registre Général de Contrôle")
         st.dataframe(df_anom, hide_index=True, use_container_width=True)
 
-        # Export DAF
+        # Extraction pour M. Élie DIGNOU (DAF)
         st.divider()
-        st.header("📤 Finalisation et Rapport pour le DAF")
-        if st.button("🏗️ Compiler le Fichier Maître Unique pour M. Élie DIGNOU (DAF)", type="primary", use_container_width=True):
-            output_buffer = io.BytesIO()
-            with pd.ExcelWriter(output_buffer, engine='xlsxwriter') as writer:
-                df_meta = pd.DataFrame({
-                    "SYSTÈME SÉCURISÉ DU CONTRÔLE INTERNE": ["Destinataire Officiel", "Émetteur", "Horodatage d'extraction", "Périmètre Filtré", "Statut de Livraison"],
-                    "MÉTADONNÉES SKAB NUTRITION": ["M. Élie DIGNOU (DAF)", "Chef de Département Contrôle Interne", datetime.now().strftime("%d/%m/%Y à %H:%M"), agence_choisie, "SCELLÉ ET SÉCURISÉ"]
-                })
-                df_meta.to_excel(writer, sheet_name="ACCUEIL_CONSO", index=False)
-                df_anom.to_excel(writer, sheet_name="CONSO_ANOMALIES", index=False)
+        st.subheader("📤 Reporting de Direction")
+        if st.button("🏗️ Générer le Rapport Souverain pour le DAF", type="primary", use_container_width=True):
+            out_buf = io.BytesIO()
+            with pd.ExcelWriter(out_buf, engine='xlsxwriter') as wr:
+                # Page de garde
+                pd.DataFrame({
+                    "SYSTÈME INTEGRÉ DE CONTRÔLE INTERNE": ["Destinataire", "Auteur", "Généré le", "Périmètre Extrait"],
+                    "MÉTADONNÉES GROUPE SKAB": ["M. Élie DIGNOU (DAF)", "Chef de Département Contrôle Interne", datetime.now().strftime("%d/%m/%Y à %H:%M"), pays_selectionne]
+                }).to_excel(wr, sheet_name="MÉTADONNÉES", index=False)
                 
-            st.success("🎉 Le livrable maître a été figé sur la base de vos filtres dynamiques.")
+                # Écritures des données consolidées
+                df_anom.to_excel(wr, sheet_name="CONSO_ANOMALIES", index=False)
+                if not df_miss.empty:
+                    df_miss.to_excel(wr, sheet_name="CONSO_MISSIONS", index=False)
+                    
+            st.success("🎉 Le fichier d'audit scellé a été mis en mémoire avec succès.")
             st.download_button(
-                label="💾 Télécharger le Fichier Excel Consolidé (.xlsx)",
-                data=output_buffer.getvalue(),
-                file_name=f"SKAB_RAPPORT_MAITRE_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                label="💾 Télécharger le Livrable Consolidé DAF (.xlsx)",
+                data=out_buf.getvalue(),
+                file_name=f"SKAB_AUDIT_DAF_{datetime.now().strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
 
 
 # ==============================================================================
-# ONGLETS 2 : INTERFACE DE SAISIE ET TRANSFERT (CONTRÔLEURS TERRAINS)
+# ONGLET 3 : REQUÊTEUR SQL NATIVE & ETAT DES TABLES
 # ==============================================================================
-with tab_terrain:
-    st.title("📥 Portail d'Injection Automatique pour Agents de Terrain")
-    st.subheader("Zéro mail, zero ressaisie — Synchronisation directe avec Supabase")
-
-    # MÉTHODE 1 : INJECTION EXCEL
-    st.markdown("#### 📁 Méthode 1 : Charger un fichier Excel individuel (ex: Jean-Pierre MVA)")
-    file_uploaded = st.file_uploader("Glissez-déposez votre fichier de travail (.xlsx) :", type="xlsx")
+with tabs[2]:
+    st.header("🛢️ Console SQL & États Réels des Tables Supabase")
+    st.markdown("Interrogez directement vos données consolidées à l'aide de requêtes PostgreSQL natives.")
     
-    if file_uploaded:
-        try:
-            df_raw_t = pd.read_excel(file_uploaded, sheet_name="ANOMALIES", header=None)
-            
-            header_idx = 0
-            for idx, row in df_raw_t.iterrows():
-                if any("ID Anomalie" in str(s) for s in row.values):
-                    header_idx = idx
-                    break
-            
-            df_to_inject = pd.read_excel(file_uploaded, sheet_name="ANOMALIES", skiprows=header_idx)
-            
-            if df_to_inject.empty:
-                st.error("⚠️ Le fichier chargé ne contient aucune ligne de données valides.")
-            else:
-                df_to_inject.columns = [clean_column_name(c) for c in df_to_inject.columns]
-                df_to_inject = df_to_inject.dropna(subset=[df_to_inject.columns[0]])
-                df_to_inject = df_to_inject[~df_to_inject[df_to_inject.columns[0]].astype(str).str.contains("une_anomalie|id_anomalie", na=False, case=False)]
-                
-                df_to_inject['fichier_source'] = file_uploaded.name
-                df_to_inject['date_saisie_base'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # Rappel de la structure disponible
+    with st.expander("📚 Consulter le dictionnaire de vos tables SQL disponibles", expanded=True):
+        st.markdown("""
+            * **`table_anomalies`** : Registre complet des écarts (Colonnes types: `id_anomalie`, `date_detection`, `site_entite`, `impact_estime_fcfa`, `statut`...)
+            * **`table_missions`** : Journal général des mandats (`n_mission`, `date_debut`, `pays_entite`, `statut_mission`...)
+            * **`table_points_controle`** : Lignes individuelles de vérification (`code_point`, `resultat`, `observation_constat`...)
+            * **`table_plans_action`** : Suivi des remédiations de risques (`id_plan`, `id_anomalie_liee`, `avancement`...)
+        """)
 
-                st.markdown("##### ⚙️ Sélectionner le Mode d'écriture :")
-                mode_ecriture = st.radio(
-                    "Action à mener :",
-                    [
-                        "Ajouter à la suite (À utiliser au quotidien pour cumuler les rapports)",
-                        "Initialiser / Recréer la table (⚠️ Écrase et recrée la table à neuf)"
-                    ]
-                )
-                
-                if_exists_param = "replace" if "Initialiser" in mode_ecriture else "append"
-
-                # Sécurité d'alignement appliquée uniquement si on ajoute à une table existante
-                if if_exists_param == "append":
-                    df_to_inject = force_match_supabase_columns(df_to_inject, "anomalies", engine)
-
-                st.write(f"📝 **Aperçu des données prêtes à être envoyées ({df_to_inject.shape[0]} lignes) :**")
-                st.dataframe(df_to_inject, hide_index=True)
-
-                if st.button("🚀 Synchroniser le fichier avec Supabase", type="primary"):
-                    df_to_inject.to_sql("anomalies", con=engine, if_exists=if_exists_param, index=False)
-                    st.success(f"🔥 Opération réussie ! Structure et données Excel synchronisées dans Supabase.")
-                    st.balloons()
-                    
-        except Exception as err:
-            st.error(f"❌ Une erreur est survenue lors de la synchronisation : {err}")
-
-    st.divider()
-
-    # MÉTHODE 2 : FORMULAIRE WEB DIRECT
-    st.markdown("#### 📝 Méthode 2 : Formulaire de Saisie Directe à la volée (Sans fichier)")
-    with st.form("form_saisie_directe"):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            f_id = st.text_input("ID Anomalie *", value="ANOM-2026-")
-            f_pays = st.selectbox("Filiale / Pays", ["Cameroun", "Tchad", "Gabon", "RCA", "Congo"])
-            f_site = st.text_input("Site / Agence / Entité *", placeholder="Ex: Moundou Agence")
-        with c2:
-            f_date = st.date_input("Date du constat")
-            f_domaine = st.selectbox("Type / Domaine", ["AGENCES", "FERMES", "TRESORERIE", "COMPTABILITE", "ACHATS_STOCK", "PATRIMOINE"])
-            f_crit = st.selectbox("Niveau de criticité", ["🟢 Faible", "🟡 Mineur", "🟠 Majeur", "🔴 Critique"])
-        with c3:
-            f_impact = st.number_input("Impact Financier Estimé (FCFA)", min_value=0, step=50000)
-            f_resp = st.text_input("Responsable de traitement")
-            f_statut = st.selectbox("Statut initial", ["Ouvert", "En cours", "Résolu"])
-            
-        f_desc = st.text_area("Description détaillée et factuelle des écarts *")
-        f_cause = st.text_area("Cause racine identifiée")
-        
-        btn_submit = st.form_submit_button("💾 Enregistrer directement dans Supabase")
-        
-        if btn_submit:
-            if len(f_id) <= 10 or not f_site or not f_desc:
-                st.error("⚠️ Veuillez remplir tous les champs obligatoires marqués d'un astérisque (*).")
-            else:
-                raw_form_data = {
-                    "ID Anomalie": [f_id], "Date détection": [str(f_date)], "Site / Entité": [f_site],
-                    "Pays": [f_pays], "Type / Domaine": [f_domaine], "Niveau criticité": [f_crit],
-                    "Description": [f_desc], "Cause racine identifiée": [f_cause], "Impact estimé (FCFA)": [f_impact],
-                    "Responsable traitement": [f_resp], "Statut": [f_statut], "Fichier Source": ["Formulaire Web Direct"],
-                    "Date Saisie Base": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
-                }
-                
-                df_form = pd.DataFrame(raw_form_data)
-                df_form.columns = [clean_column_name(c) for c in df_form.columns]
-                
-                # Aligne le formulaire sur la structure PostgreSQL
-                df_form = force_match_supabase_columns(df_form, "anomalies", engine)
-                
-                try:
-                    df_form.to_sql("anomalies", con=engine, if_exists="append", index=False)
-                    st.success(f"🔥 Enregistrement validé ! L'anomalie **{f_id}** est intégrée dans Supabase.")
-                except Exception as ex:
-                    st.error(f"⚠️ Échec de l'insertion. Assurez-vous d'avoir recréé la table proprement via la méthode Excel (Option Initialiser) avant d'utiliser le formulaire.")
+    st.subheader("🖋️ Saisir ou coller une requête SQL")
+    ex_query = "SELECT site_entite, COUNT(*) as volume_anomalies, SUM(impact_estime_fcfa) as risque_total \nFROM table_anomalies \nGROUP BY site_entite \nORDER BY risque_total DESC;"
+    user_sql = st.text_area("Requête PostgreSQL :", value=ex_query, height=140)
+    
+    if st.button("⚡ Exécuter la requête SQL sur Supabase", type="primary"):
+        if user_sql.strip():
+            try:
+                # Exécution sécurisée via SQLAlchemy
+                with engine.connect() as r_conn:
+                    result_sql = r_conn.execute(text(user_sql))
+                    if result_sql.returns_rows:
+                        df_query_res = pd.DataFrame(result_sql.fetchall(), columns=result_sql.keys())
+                        st.success(f"🎯 Requête exécutée. Renvoie {df_query_res.shape[0]} lignes enregistrées.")
+                        st.dataframe(df_query_res, use_container_width=True)
+                    else:
+                        st.success("✅ Requête exécutée avec succès (Aucune ligne renvoyée).")
+            except Exception as sql_err:
+                st.error(f"❌ Erreur de syntaxe ou d'exécution SQL : {sql_err}")
