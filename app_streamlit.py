@@ -4,7 +4,7 @@ import plotly.express as px
 import io
 import re
 from datetime import datetime
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 
 # --- CONFIGURATION SÉCURISÉE DE LA PAGE ---
 st.set_page_config(
@@ -35,7 +35,7 @@ except Exception as e:
     st.stop()
 
 
-# --- 2. FONCTION DE NETTOYAGE UNIQUE (COMMUNE EXCEL & FORMULAIRE) ---
+# --- 2. FONCTIONS OUTILS ---
 def clean_column_name(col):
     """Nettoie proprement les en-têtes pour PostgreSQL (pas d'accents, espaces ou caractères spéciaux doublés)"""
     s = str(col).strip().lower()
@@ -43,7 +43,6 @@ def clean_column_name(col):
     s = re.sub(r"[/\-()°’']", " ", s)  # Remplace les séparateurs par des espaces
     s = re.sub(r"\s+", "_", s)         # Remplace les espaces multiples par un seul underscore
     return s.strip("_")
-
 
 def load_table_from_supabase(table_name):
     """Charge une table depuis Supabase avec gestion de l'absence de table"""
@@ -53,6 +52,25 @@ def load_table_from_supabase(table_name):
         return pd.DataFrame(df)
     except Exception:
         return pd.DataFrame()
+
+def force_match_supabase_columns(df_source, table_name, engine_pg):
+    """🛡️ Aligne parfaitement le DataFrame sur la structure réelle de Supabase pour éviter le ValueError"""
+    try:
+        inspector = inspect(engine_pg)
+        if table_name in inspector.get_table_names():
+            # Récupère les colonnes réelles de la table Supabase
+            db_columns = [col['name'] for col in inspector.get_columns(table_name)]
+            
+            # 1. Ajoute dans notre DataFrame les colonnes de la base qui manquent (remplies par du vide)
+            for col in db_columns:
+                if col not in df_source.columns:
+                    df_source[col] = None
+                    
+            # 2. On ne garde STRICTEMENT que les colonnes qui existent dans la base de données
+            df_source = df_source[db_columns]
+    except Exception as e:
+        pass
+    return df_source
 
 def get_safe_len(series, col_name):
     clean = series.dropna()
@@ -84,7 +102,7 @@ with tab_chef:
     else:
         df_anom.columns = [str(c).lower().strip() for c in df_anom.columns]
         
-        # Mappings des colonnes basés sur le nettoyage standardisé
+        # Mappings dynamiques souples
         c_site = next((c for c in df_anom.columns if 'site' in c or 'entite' in c or 'agence' in c), df_anom.columns[2])
         c_date = next((c for c in df_anom.columns if 'date' in c), df_anom.columns[1])
         c_impact = next((c for c in df_anom.columns if 'impact' in c), None)
@@ -153,7 +171,6 @@ with tab_chef:
                 fig2.update_layout(height=320, margin=dict(l=0, r=0, t=10, b=0))
                 st.plotly_chart(fig2, use_container_width=True)
 
-        # Affichage ciblé "EN COURS"
         st.divider()
         st.markdown("### ⏳ Focus Exclusif sur les Incidents au Statut ''EN COURS''")
         if c_statut:
@@ -215,42 +232,42 @@ with tab_terrain:
             if df_to_inject.empty:
                 st.error("⚠️ Le fichier chargé ne contient aucune ligne de données valides.")
             else:
-                # Nettoyage uniforme des colonnes du fichier Excel
                 df_to_inject.columns = [clean_column_name(c) for c in df_to_inject.columns]
-                
-                # Nettoyage des consignes textuelles
                 df_to_inject = df_to_inject.dropna(subset=[df_to_inject.columns[0]])
                 df_to_inject = df_to_inject[~df_to_inject[df_to_inject.columns[0]].astype(str).str.contains("une_anomalie|id_anomalie", na=False, case=False)]
                 
-                # Traçabilité
                 df_to_inject['fichier_source'] = file_uploaded.name
                 df_to_inject['date_saisie_base'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-                st.write(f"📝 **Aperçu des données prêtes à être envoyées ({df_to_inject.shape[0]} lignes) :**")
-                st.dataframe(df_to_inject, hide_index=True)
 
                 st.markdown("##### ⚙️ Sélectionner le Mode d'écriture :")
                 mode_ecriture = st.radio(
                     "Action à mener :",
                     [
-                        "Initialiser / Recréer la table (À faire uniquement pour la toute première injection)",
-                        "Ajouter à la suite (À utiliser au quotidien pour ne pas écraser les autres données)"
+                        "Ajouter à la suite (À utiliser au quotidien pour cumuler les rapports)",
+                        "Initialiser / Recréer la table (⚠️ Écrase et recrée la table à neuf)"
                     ]
                 )
                 
                 if_exists_param = "replace" if "Initialiser" in mode_ecriture else "append"
 
+                # 🛡️ SÉCURITÉ DE CARTOGRAPHIE DES COLONNES SI MODE APPEND
+                if if_exists_param == "append":
+                    df_to_inject = force_match_supabase_columns(df_to_inject, "anomalies", engine)
+
+                st.write(f"📝 **Aperçu final des données alignées pour Supabase ({df_to_inject.shape[0]} lignes) :**")
+                st.dataframe(df_to_inject, hide_index=True)
+
                 if st.button("🚀 Synchroniser le fichier avec Supabase", type="primary"):
                     df_to_inject.to_sql("anomalies", con=engine, if_exists=if_exists_param, index=False)
-                    st.success(f"🔥 Opération réussie ! Les données Excel sont synchronisées dans Supabase.")
+                    st.success(f"🔥 Opération réussie ! Les données Excel ont été poussées sans conflit structurel.")
                     st.balloons()
                     
         except Exception as err:
-            st.error("❌ Une erreur est survenue lors de la synchronisation de l'Excel.")
+            st.error(f"❌ Une erreur est survenue lors de la synchronisation : {err}")
 
     st.divider()
 
-    # MÉTHODE 2 : FORMULAIRE WEB DIRECT CORRIGÉ
+    # MÉTHODE 2 : FORMULAIRE WEB DIRECT BRINDÉ
     st.markdown("#### 📝 Méthode 2 : Formulaire de Saisie Directe à la volée (Sans fichier)")
     with st.form("form_saisie_directe"):
         c1, c2, c3 = st.columns(3)
@@ -276,30 +293,22 @@ with tab_terrain:
             if len(f_id) <= 10 or not f_site or not f_desc:
                 st.error("⚠️ Veuillez remplir tous les champs obligatoires marqués d'un astérisque (*).")
             else:
-                # 💡 LE FIX GLOBAL : On crée le dictionnaire avec les clés Excel exactes 
-                # et on leur applique DIRECTEMENT la fonction clean_column_name() !
                 raw_form_data = {
-                    "ID Anomalie": [f_id], 
-                    "Date détection": [str(f_date)], 
-                    "Site / Entité": [f_site],
-                    "Pays": [f_pays], 
-                    "Type / Domaine": [f_domaine], 
-                    "Niveau criticité": [f_crit],
-                    "Description": [f_desc], 
-                    "Cause racine identifiée": [f_cause], 
-                    "Impact estimé (FCFA)": [f_impact],
-                    "Responsable traitement": [f_resp], 
-                    "Statut": [f_statut], 
-                    "Fichier Source": ["Formulaire Web Direct"],
+                    "ID Anomalie": [f_id], "Date détection": [str(f_date)], "Site / Entité": [f_site],
+                    "Pays": [f_pays], "Type / Domaine": [f_domaine], "Niveau criticité": [f_crit],
+                    "Description": [f_desc], "Cause racine identifiée": [f_cause], "Impact estimé (FCFA)": [f_impact],
+                    "Responsable traitement": [f_resp], "Statut": [f_statut], "Fichier Source": ["Formulaire Web Direct"],
                     "Date Saisie Base": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
                 }
                 
-                # Conversion en DataFrame et application du même nettoyage strict des colonnes
                 df_form = pd.DataFrame(raw_form_data)
                 df_form.columns = [clean_column_name(c) for c in df_form.columns]
                 
+                # 🛡️ Aligne aussi le formulaire sur la structure exacte de Supabase
+                df_form = force_match_supabase_columns(df_form, "anomalies", engine)
+                
                 try:
                     df_form.to_sql("anomalies", con=engine, if_exists="append", index=False)
-                    st.success(f"🔥 Enregistrement validé ! L'anomalie **{f_id}** a été poussée proprement dans Supabase.")
+                    st.success(f"🔥 Enregistrement validé ! L'anomalie **{f_id}** est intégrée dans Supabase.")
                 except Exception as ex:
-                    st.error("⚠️ Échec de l'insertion. Assurez-vous d'avoir initialisé la structure de la table au moins une fois via l'import de fichier (Méthode 1).")
+                    st.error(f"⚠️ Échec de l'insertion : {ex}")
