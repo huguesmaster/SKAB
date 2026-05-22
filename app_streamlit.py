@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.express as px
 import io
 import re
-import psycopg2  # Importation native demandée par Supabase
+import psycopg2  # Connecteur natif requis par Supabase
 from datetime import datetime
 from sqlalchemy import create_engine, text
 import urllib.parse  # Pour sécuriser les caractères spéciaux du mot de passe
@@ -25,21 +25,24 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# --- 1. CONNEXION AVEC LES PARAMÈTRES EXPLICITES DE SUPABASE ---
+# --- 1. CONNEXION ROUTÉE VIA LE POOLER IPv4 DE SUPABASE ---
 try:
-    # Extraction des variables depuis vos secrets Streamlit
-    DB_HOST = "db.fkqlhylqsyycaiuukewf.supabase.co"
-    DB_PORT = "5432"
+    # Paramètres de connexion officiels mis à jour pour contourner l'erreur IPv6 (Cannot assign requested address)
+    DB_HOST = "aws-0-eu-central-1.pooler.supabase.com"  # Hôte de transaction IPv4 stable
+    DB_PORT = "6543"                                    # Port dédié au pooler Supabase
     DB_NAME = "postgres"
-    DB_USER = "postgres"
+    DB_USER = "postgres.fkqlhylqsyycaiuukewf"           # Format d'authentification du pooler
+    
+    # Récupération sécurisée du mot de passe depuis vos Secrets Streamlit Cloud
     DB_PASSWORD = st.secrets["connections"]["supabase"]["password"]
     
-    # Sécurité critique : On encode le mot de passe pour éviter l'erreur "could not translate host name"
-    # si votre mot de passe contient un '@', '/', ou autre caractère spécial.
+    # Sécurité : Encodage du mot de passe pour neutraliser les caractères spéciaux (@, #, /, etc.)
     encoded_password = urllib.parse.quote_plus(DB_PASSWORD)
     
-    # Assemblage de l'URL de l'Engine SQLAlchemy avec les paramètres isolés
-    DATABASE_URL = f"postgresql://{DB_USER}:{encoded_password}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    # Construction de l'URI de connexion avec forçage du mode SSL
+    DATABASE_URL = f"postgresql://{DB_USER}:{encoded_password}@{DB_HOST}:{DB_PORT}/{DB_NAME}?sslmode=require"
+    
+    # Création de l'engine de persistance SQLAlchemy
     engine = create_engine(DATABASE_URL)
     
 except Exception as e:
@@ -47,9 +50,9 @@ except Exception as e:
     st.stop()
 
 
-# --- 2. SÉCURITÉ : INITIALISATION DU SCHÉMA VIA PSYCOPG2 & SQLALCHEMY ---
+# --- 2. INITIALISATION FORCÉE DU SCHÉMA (ORDRES DDL ADMINISTRATEUR) ---
 def force_init_supabase_schema(sql_engine):
-    """Déclare explicitement les ordres DDL pour forcer la création physique des tables"""
+    """Garantit la création physique des tables dans le schéma public de Supabase"""
     queries = [
         """
         CREATE TABLE IF NOT EXISTS table_anomalies (
@@ -93,11 +96,11 @@ def force_init_supabase_schema(sql_engine):
             trans.commit()
         except Exception as err:
             trans.rollback()
-            st.error(f"💥 Erreur lors de l'application de la structure SQL : {err}")
+            st.error(f"💥 Impossible d'initialiser les tables sur le serveur : {err}")
 
 
 def clean_column_name(col):
-    """Standardise les en-têtes Excel au format compatible PostgreSQL"""
+    """Nettoie les en-têtes des fichiers Excel pour correspondre aux normes PostgreSQL"""
     s = str(col).strip().lower()
     s = s.replace("é", "e").replace("è", "e").replace("ê", "e").replace("à", "a").replace("ç", "c")
     s = re.sub(r"[/\-()°’'%]", " ", s)
@@ -105,7 +108,7 @@ def clean_column_name(col):
     return s.strip("_")
 
 def load_table_from_supabase(table_name):
-    """Récupère le contenu d'une table, retourne un DataFrame vide si la table est vierge"""
+    """Charge de manière sécurisée une table sous forme de DataFrame, évite le crash si vide"""
     try:
         with engine.connect() as read_conn:
             return pd.read_sql_query(text(f"SELECT * FROM {table_name};"), read_conn)
@@ -113,9 +116,9 @@ def load_table_from_supabase(table_name):
         return pd.DataFrame()
 
 
-# --- 3. INTERFACE DE LA CONSOLE ---
+# --- 3. ARCHITECTURE GENERALE DES ONGLETS ---
 st.title("🛡️ SKAB NUTRITION — Console de Supervision du Contrôle Interne")
-st.caption("Système d'administration cloud — Connecté à l'instance db.fkqlhylqsyycaiuukewf.supabase.co")
+st.caption("Espace d'administration centralisé — Canal sécurisé Pooler Supabase")
 
 tabs = st.tabs([
     "📥 Injection des Livrables", 
@@ -125,13 +128,13 @@ tabs = st.tabs([
 
 
 # ==============================================================================
-# ONGLET 1 : IMPORTATION DES CLASSEURS EXCEL
+# ONGLET 1 : INJECTION SÉCURISÉE DES CLASSEURS TERRAINS
 # ==============================================================================
 with tabs[0]:
     st.header("🗂️ Centralisation et Structuration des rapports terrains")
     st.markdown("""
-        Déposez le classeur Excel d'un contrôleur. L'application va valider la structure des données,
-        vérifier l'existence des tables sur votre serveur **Supabase** et y pousser les lignes.
+        Déposez ici le classeur Excel d'un contrôleur. Le système va forcer la création des tables manquantes 
+        sur votre instance **Supabase** via le tunnel d'écriture sécurisé avant d'y transférer les lignes.
     """)
     
     src_file = st.file_uploader("Sélectionnez le fichier Excel à intégrer (.xlsx) :", type="xlsx")
@@ -148,22 +151,22 @@ with tabs[0]:
             excel_obj = pd.ExcelFile(src_file)
             available_sheets = excel_obj.sheet_names
             
-            st.info(f"📁 Fichier chargé : `{src_file.name}` (Onglets détectés : {', '.join(available_sheets)})")
+            st.info(f"📁 Fichier chargé en mémoire : `{src_file.name}` (Onglets détectés : {', '.join(available_sheets)})")
             
             mode_import = st.radio(
-                "Option d'écriture dans la base :",
+                "Stratégie de stockage dans la base de données :",
                 [
-                    "Ajouter les lignes à la suite de l'historique global",
-                    "⚠️ Vider les tables existantes et réinsérer uniquement ce fichier (Purge)"
+                    "Ajouter les données à la suite de l'historique global",
+                    "⚠️ Vider la base en ligne et réinitialiser toutes les tables à neuf (Purge complète)"
                 ]
             )
             
             if st.button("🚀 Valider et injecter dans la table Supabase", type="primary", use_container_width=True):
                 
-                # ⚙️ ORDRE CRITIQUE : Crée physiquement les tables si Supabase est vide
+                # 🔥 APPEL CRITIQUE : Crée les structures physiques si elles n'existent pas
                 force_init_supabase_schema(engine)
                 
-                # Gestion du TRUNCATE si demandé
+                # Gestion de la réinitialisation complète si cochée
                 if "Vider" in mode_import:
                     with engine.connect() as clear_conn:
                         trans = clear_conn.begin()
@@ -171,7 +174,7 @@ with tabs[0]:
                             for db_table in target_sheets.values():
                                 clear_conn.execute(text(f"TRUNCATE TABLE {db_table};"))
                             trans.commit()
-                            st.warning("🗑️ Base nettoyée avec succès. Début du transfert des lignes...")
+                            st.warning("🗑️ Base de données vidée avec succès. Début du transfert des lignes...")
                         except Exception:
                             trans.rollback()
                 
@@ -183,6 +186,7 @@ with tabs[0]:
                         df_raw = pd.read_excel(src_file, sheet_name=sheet_name, header=None)
                         header_idx = 0
                         
+                        # Détection dynamique de la ligne d'en-tête
                         for r_idx, row in df_raw.iterrows():
                             row_str = " ".join([str(v) for v in row.values])
                             if any(k in row_str for k in ["ID", "N°", "Date", "Statut"]):
@@ -198,11 +202,11 @@ with tabs[0]:
                             df_clean = df_clean.dropna(subset=[first_col])
                             df_clean = df_clean[~df_clean[first_col].astype(str).str.contains("une_anomalie|id_anomalie|exemple", na=False, case=False)]
                             
-                            # Ajout des métadonnées obligatoires
+                            # Injection des métadonnées d'audit
                             df_clean['meta_source_file'] = src_file.name
                             df_clean['meta_import_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             
-                            # Réalignement structurel
+                            # Alignement strict sur la structure réelle en base PostgreSQL
                             with engine.connect() as col_conn:
                                 query_cols = pd.read_sql_query(text(f"SELECT * FROM {db_table} LIMIT 0;"), col_conn)
                             
@@ -212,25 +216,25 @@ with tabs[0]:
                                     df_clean[c] = None
                             df_clean = df_clean[db_cols]
                             
-                            # Écriture finale vers PostgreSQL
+                            # Écriture par lot sécurisée
                             with engine.connect() as write_conn:
                                 df_clean.to_sql(db_table, con=write_conn, if_exists="append", index=False)
                             
-                            st.caption(f"✅ Table `{db_table}` mise à jour ({df_clean.shape[0]} lignes transférées).")
+                            st.caption(f"✅ Table `{db_table}` synchronisée ({df_clean.shape[0]} lignes enregistrées).")
                             success_count += 1
                     
                     progress_bar.progress((idx + 1) / len(target_sheets))
                 
                 if success_count > 0:
-                    st.success(f"🎉 Synchronisation validée ! Vos tables sont créées et alimentées sur Supabase.")
+                    st.success(f"🎉 Succès ! Vos livrables ont été injectés avec succès sur votre instance Supabase.")
                     st.balloons()
                     
         except Exception as ex:
-            st.error(f"❌ Erreur lors de l'analyse ou du transfert SQL : {ex}")
+            st.error(f"❌ Erreur lors du traitement ou du transfert SQL : {ex}")
 
 
 # ==============================================================================
-# ONGLET 2 : ANALYSE ET GRAPHIQUES (RESTITUTION)
+# ONGLET 2 : RESTITUTION ET RESTORATION DES METRICS
 # ==============================================================================
 with tabs[1]:
     st.header("📊 Consolidation Automatique du Groupe")
@@ -238,7 +242,7 @@ with tabs[1]:
     df_anom = load_table_from_supabase("table_anomalies")
     
     if df_anom.empty:
-        st.warning("💡 Aucune donnée disponible en ligne. Injectez un premier livrable pour activer le tableau de bord.")
+        st.warning("💡 La base de données en ligne est actuellement vide. Veuillez importer un premier fichier Excel.")
     else:
         df_anom.columns = [c.lower() for c in df_anom.columns]
         
@@ -257,39 +261,41 @@ with tabs[1]:
         k1, k2, k3, k4 = st.columns(4)
         with k1:
             impact_total = pd.to_numeric(df_anom[c_impact], errors='coerce').fillna(0).sum() if c_impact else 0
-            st.metric("Risque Financier Cumulé", f"{impact_total:,.0f} FCFA")
+            st.metric("Risque Financier Global", f"{impact_total:,.0f} FCFA")
         with k2:
             nb_crit = df_anom[df_anom[c_crit].astype(str).str.contains('critique|🔴', na=False, case=False)].shape[0] if c_crit else 0
             st.metric("Alertes Critiques", nb_crit)
         with k3:
             nb_encours = df_anom[df_anom[c_statut].astype(str).str.upper().str.contains("EN COURS|OUVERT", na=False)].shape[0] if c_statut else 0
-            st.metric("Anomalies Non Clôturées", nb_encours)
+            st.metric("Anomalies non clôturées", nb_encours)
         with k4:
-            st.metric("Total Lignes Traitées", df_anom.shape[0])
+            st.metric("Lignes d'écarts en base", df_anom.shape[0])
 
         st.divider()
         st.dataframe(df_anom, hide_index=True, use_container_width=True)
 
 
 # ==============================================================================
-# ONGLET 3 : MONITORING ET REQUÊTES DIRECTES
+# ONGLET 3 : REQUÊTEUR TECHNIQUE DE DIAGNOSTIC
 # ==============================================================================
 with tabs[2]:
-    st.header("🔍 Console SQL native (Vérification en temps réel)")
-    st.markdown("Saisissez une requête PostgreSQL standard pour auditer le contenu brut de vos tables.")
+    st.header("🔍 Console SQL native (Accès direct Supabase)")
+    st.markdown("Utilisez cet espace pour auditer en temps réel l'état des tables de votre instance.")
     
-    user_sql = st.text_area("Requête PostgreSQL :", value="SELECT table_name FROM information_schema.tables WHERE table_schema='public';", height=100)
+    st.subheader("🖋️ Éditeur de requêtes PostgreSQL")
+    ex_query = "SELECT table_name FROM information_schema.tables WHERE table_schema='public';"
+    user_sql = st.text_area("Commande SQL :", value=ex_query, height=120)
     
-    if st.button("⚡ Exécuter l'analyse SQL", type="primary"):
+    if st.button("⚡ Exécuter la commande", type="primary"):
         if user_sql.strip():
             try:
                 with engine.connect() as query_conn:
                     result_sql = query_conn.execute(text(user_sql))
                     if result_sql.returns_rows:
                         df_query_res = pd.DataFrame(result_sql.fetchall(), columns=result_sql.keys())
-                        st.success(f"🎯 Requête réussie. {df_query_res.shape[0]} lignes renvoyées.")
+                        st.success(f"🎯 Requête validée. {df_query_res.shape[0]} lignes trouvées.")
                         st.dataframe(df_query_res, use_container_width=True)
                     else:
-                        st.success("✅ Script exécuté avec succès.")
+                        st.success("✅ Script SQL exécuté avec succès sur Supabase.")
             except Exception as sql_err:
-                st.error(f"❌ Retour du serveur Supabase : {sql_err}")
+                st.error(f"❌ Erreur renvoyée par le serveur : {sql_err}")
