@@ -4,12 +4,16 @@ import plotly.express as px
 import plotly.graph_objects as go
 import io
 import numpy as np
+import logging
 from datetime import datetime, date
 from supabase import create_client, Client
 
 # ============================================================
-# CONFIGURATION DE LA PAGE
+# CONFIGURATION LOGGING & PAGE
 # ============================================================
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 st.set_page_config(
     page_title="SKAB — Dashboard CI",
     page_icon="🛡️",
@@ -56,85 +60,129 @@ def init_supabase() -> Client:
 try:
     supabase = init_supabase()
     SUPABASE_OK = True
-except Exception:
+except Exception as e:
+    logger.error(f"Erreur Supabase : {e}")
     SUPABASE_OK = False
 
 # ============================================================
-# MOTEUR DE LECTURE DES FICHIERS EXCEL
+# MOTEUR DE LECTURE DES FICHIERS EXCEL (AMÉLIORÉ)
 # ============================================================
 def get_available_sheets(file):
     """Retourne la liste des feuilles disponibles dans le classeur."""
     try:
         xls = pd.ExcelFile(file)
+        logger.info(f"Feuilles trouvées dans {file.name}: {xls.sheet_names}")
         return xls.sheet_names
-    except Exception:
+    except Exception as e:
+        logger.error(f"Erreur lecture feuilles ({file.name}): {e}")
         return []
 
 
 def find_sheet_containing_keyword(file, keywords):
-    """Cherche la première feuille contenant l'un des mots-clés dans ses colonnes."""
+    """Cherche la première feuille contenant l'un des mots-clés."""
     sheet_names = get_available_sheets(file)
+    if not sheet_names:
+        logger.warning(f"Aucune feuille trouvée dans {file.name}")
+        return None
+    
     for sheet in sheet_names:
         try:
-            df_test = pd.read_excel(file, sheet_name=sheet, header=None, nrows=20)
+            df_test = pd.read_excel(file, sheet_name=sheet, header=None, nrows=50)
+            if df_test.empty:
+                continue
+            
             df_str = df_test.astype(str).values.flatten()
-            if any(keyword.lower() in cell.lower() for cell in df_str for keyword in keywords):
-                return sheet
-        except Exception:
+            for keyword in keywords:
+                if any(keyword.lower() in cell.lower() for cell in df_str):
+                    logger.info(f"Feuille '{sheet}' trouvée (keyword: {keyword})")
+                    return sheet
+        except Exception as e:
+            logger.debug(f"Erreur scanning feuille {sheet}: {e}")
             continue
-    return None
+    
+    logger.warning(f"Aucune feuille avec keywords {keywords} trouvée. Utilisation première feuille par défaut.")
+    return sheet_names[0] if sheet_names else None
+
+
+def detect_header_row(df_raw, keywords):
+    """Détecte la ligne d'en-tête avec flexibilité."""
+    if df_raw.empty:
+        return None
+    
+    # Premier pass : chercher les keywords exacts
+    for idx, row in df_raw.iterrows():
+        row_str = [str(val).strip().lower() for val in row.values if pd.notna(val)]
+        for keyword in keywords:
+            if keyword.lower() in ' '.join(row_str):
+                logger.info(f"En-tête trouvé à la ligne {idx} (keyword: {keyword})")
+                return idx
+    
+    # Deuxième pass : chercher "ID", "N°", "Code"
+    for idx, row in df_raw.iterrows():
+        row_str = [str(val).strip().upper() for val in row.values if pd.notna(val)]
+        if any("ID" in s or "N°" in s or "CODE" in s for s in row_str):
+            logger.info(f"En-tête détecté à la ligne {idx} (pattern ID/N°/CODE)")
+            return idx
+    
+    logger.info("Pas d'en-tête détecté, utilisation ligne 0")
+    return 0
 
 
 def load_and_clean(file, keywords, sheet=None):
     """
     Charge et nettoie les données depuis une feuille Excel.
-    Si `sheet` est None, cherche automatiquement la feuille contenant les keywords.
+    Plus robuste avec détection fallback et logging détaillé.
     """
     try:
-        # Si aucune feuille n'est spécifiée, la chercher automatiquement
+        logger.info(f"Chargement du fichier: {file.name}")
+        
+        # Déterminer la feuille
         if sheet is None:
             sheet = find_sheet_containing_keyword(file, keywords)
             if sheet is None:
+                logger.error(f"Impossible de déterminer la feuille pour {keywords}")
                 return pd.DataFrame()
         
-        # Lire une seule fois
-        df_raw = pd.read_excel(file, sheet_name=sheet, header=None)
+        logger.info(f"Lecture de la feuille '{sheet}'...")
+        
+        # Lire toutes les données brutes
+        df_raw = pd.read_excel(file, sheet_name=sheet, header=None, dtype=str)
+        logger.info(f"Données brutes chargées: {df_raw.shape}")
         
         if df_raw.empty:
+            logger.warning(f"Feuille '{sheet}' vide")
             return pd.DataFrame()
 
-        # Chercher la ligne d'en-tête
-        header_idx = None
-        for idx, row in df_raw.iterrows():
-            row_str = [str(val).strip() for val in row.values]
-            if any(keyword.lower() in cell.lower() for cell in row_str for keyword in keywords):
-                header_idx = idx
-                break
-
-        if header_idx is None:
-            for idx, row in df_raw.iterrows():
-                row_str = [str(val).strip() for val in row.values]
-                if any("ID" in s or "N°" in s or "Code" in s for s in row_str):
-                    header_idx = idx
-                    break
-
+        # Déterminer la ligne d'en-tête
+        header_idx = detect_header_row(df_raw, keywords)
         if header_idx is None:
             header_idx = 0
-
+        
         # Relire à partir de la ligne d'en-tête détectée
         df = pd.read_excel(file, sheet_name=sheet, skiprows=header_idx)
+        logger.info(f"Données nettoyées: {df.shape} après skiprows={header_idx}")
+        
+        # Normaliser les colonnes
         df.columns = [str(c).strip() for c in df.columns]
-        df = df.dropna(subset=[df.columns[0]]) if not df.empty else df
+        
+        # Supprimer lignes vides
+        initial_rows = len(df)
+        df = df.dropna(subset=[df.columns[0]], how='all') if not df.empty else df
         df = df.dropna(how='all')
-
+        logger.info(f"Après dropna: {len(df)} lignes (éliminé {initial_rows - len(df)})")
+        
+        # Filtrer lignes "placeholder"
         if not df.empty:
             df = df[~df[df.columns[0]].astype(str).str.contains(
-                "Une anomalie|Un plan|Saisissez|Une ligne", na=False
+                "Une anomalie|Un plan|Saisissez|Une ligne", na=False, case=False
             )]
             df['Fichier Source'] = file.name
+            logger.info(f"Données finales: {len(df)} lignes")
 
         return df
+        
     except Exception as e:
+        logger.error(f"Erreur chargement {file.name}: {type(e).__name__} - {str(e)}", exc_info=True)
         return pd.DataFrame()
 
 
@@ -146,25 +194,39 @@ def process_consolidation(files):
         return all_data
     
     for f in files:
+        logger.info(f"Traitement du fichier: {f.name}")
+        
         # Missions
-        df_missions = load_and_clean(f, ["N° Mission", "Mission", "mission"])
+        df_missions = load_and_clean(f, ["N° Mission", "Mission", "mission", "N°Mission", "Num Mission"])
         if not df_missions.empty:
             all_data["MISSIONS"].append(df_missions)
+            logger.info(f"  ✓ {len(df_missions)} missions trouvées")
+        else:
+            logger.info(f"  ✗ Aucune mission trouvée")
         
         # Points de contrôle
-        df_points = load_and_clean(f, ["ID Point", "Point de Contrôle", "point", "Point"])
+        df_points = load_and_clean(f, ["ID Point", "Point de Contrôle", "point", "Point", "ID_Point", "point_control"])
         if not df_points.empty:
             all_data["POINTS"].append(df_points)
+            logger.info(f"  ✓ {len(df_points)} points trouvés")
+        else:
+            logger.info(f"  ✗ Aucun point trouvé")
         
         # Anomalies
-        df_anomalies = load_and_clean(f, ["ID Anomalie", "Anomalie", "anomalie"])
+        df_anomalies = load_and_clean(f, ["ID Anomalie", "Anomalie", "anomalie", "ID_Anomalie", "ID Anom"])
         if not df_anomalies.empty:
             all_data["ANOMALIES"].append(df_anomalies)
+            logger.info(f"  ✓ {len(df_anomalies)} anomalies trouvées")
+        else:
+            logger.info(f"  ✗ Aucune anomalie trouvée")
         
         # Plans d'action
-        df_plans = load_and_clean(f, ["ID Plan", "Plan", "plan"])
+        df_plans = load_and_clean(f, ["ID Plan", "Plan", "plan", "ID_Plan", "ID Plan d'action"])
         if not df_plans.empty:
             all_data["PLANS"].append(df_plans)
+            logger.info(f"  ✓ {len(df_plans)} plans trouvés")
+        else:
+            logger.info(f"  ✗ Aucun plan trouvé")
 
     return {k: pd.concat(v, ignore_index=True) if v else pd.DataFrame()
             for k, v in all_data.items()}
@@ -209,7 +271,7 @@ def push_to_supabase(data: dict, source_files):
 
     df_a = data["ANOMALIES"]
     if not df_a.empty:
-        col_id    = next((c for c in df_a.columns if 'ID Anomalie' in c), None)
+        col_id    = next((c for c in df_a.columns if 'ID Anomalie' in c or 'ID_Anomalie' in c), None)
         col_mis   = next((c for c in df_a.columns if 'Mission'     in c or 'N°' in c), None)
         col_ag    = next((c for c in df_a.columns if 'Agence'      in c or 'Site' in c or 'Entité' in c), None)
         col_pays  = next((c for c in df_a.columns if 'Pays'        in c), None)
@@ -242,7 +304,7 @@ def push_to_supabase(data: dict, source_files):
 
     df_p = data["POINTS"]
     if not df_p.empty:
-        col_id   = next((c for c in df_p.columns if 'ID Point' in c), None)
+        col_id   = next((c for c in df_p.columns if 'ID Point' in c or 'ID_Point' in c), None)
         col_mis  = next((c for c in df_p.columns if 'Mission'  in c or 'N°' in c), None)
         col_ag   = next((c for c in df_p.columns if 'Agence'   in c or 'Site' in c), None)
         col_res  = next((c for c in df_p.columns if 'Résultat' in c or 'Result' in c), None)
@@ -263,7 +325,7 @@ def push_to_supabase(data: dict, source_files):
 
     df_pl = data["PLANS"]
     if not df_pl.empty:
-        col_id   = next((c for c in df_pl.columns if 'ID Plan'     in c), None)
+        col_id   = next((c for c in df_pl.columns if 'ID Plan' in c or 'ID_Plan' in c), None)
         col_anom = next((c for c in df_pl.columns if 'Anomalie'    in c), None)
         col_ag   = next((c for c in df_pl.columns if 'Agence'      in c or 'Site' in c), None)
         col_resp = next((c for c in df_pl.columns if 'Responsable' in c), None)
@@ -405,6 +467,10 @@ if source_mode == "📂 Fichiers Excel (Import local)":
     
     with st.spinner("Chargement et consolidation des données..."):
         data = process_consolidation(uploaded_files)
+        
+        # Afficher les logs dans un expander
+        with st.expander("📋 Détails du traitement", expanded=False):
+            st.info("✓ Vérifiez les logs ci-dessus pour les détails du chargement.")
     
     # Afficher un résumé
     st.divider()
@@ -418,7 +484,14 @@ if source_mode == "📂 Fichiers Excel (Import local)":
     
     # Vérifier si les données sont vides
     if data["ANOMALIES"].empty and data["MISSIONS"].empty and data["POINTS"].empty and data["PLANS"].empty:
-        st.error("❌ Aucune donnée n'a pu être extraite. Vérifiez le format de vos fichiers.")
+        st.error("❌ Aucune donnée n'a pu être extraite.")
+        st.info("💡 **Vérifications à faire :**")
+        st.markdown("""
+        - Les noms de colonnes contiennent-ils : **Mission, Anomalie, Point, Plan** ?
+        - Y a-t-il une **ligne d'en-tête** bien définie ?
+        - Le fichier Excel n'a-t-il pas de **lignes vides au début** ?
+        - Les **noms de feuilles** sont-ils standards (ex: "Données", "Sheet1") ?
+        """)
         st.stop()
     
 else:
