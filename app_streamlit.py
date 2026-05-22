@@ -599,7 +599,7 @@ if not df_anom_f.empty and col_stat_a:
         df_show = df_en_cours[cols_ec] if cols_ec else df_en_cours
         if col_crit and col_crit in df_show.columns:
             st.dataframe(
-                df_show.style.applymap(color_crit, subset=[col_crit]),
+                df_show.style.map(color_crit, subset=[col_crit]) if hasattr(df_show.style, 'map') else df_show.style.applymap(color_crit, subset=[col_crit]),
                 hide_index=True, use_container_width=True, height=350
             )
         else:
