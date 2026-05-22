@@ -396,12 +396,20 @@ col_pays    = find_col(df_anom, "pays")
 col_ag_a    = find_col(df_anom, "agence")
 col_stat_a  = find_col(df_anom, "statut")
 col_date_a  = find_col(df_anom, "date")
-col_ctrl    = find_col(df_anom, "controleur")  # ← NOUVEAU
+col_ctrl    = find_col(df_anom, "controleur")
 col_tx_conf = find_col(df_mis,  "conformite")
 col_ag_m    = find_col(df_mis,  "agence")
 
 # ============================================================
-# FILTRES DYNAMIQUES (Agence + Contrôleur)
+# INITIALISER LES VARIABLES DE FILTRE DANS SESSION STATE
+# ============================================================
+if "agence_sel" not in st.session_state:
+    st.session_state.agence_sel = None
+if "ctrl_sel" not in st.session_state:
+    st.session_state.ctrl_sel = []
+
+# ============================================================
+# RÉCUPÉRER LES VALEURS DISPONIBLES
 # ============================================================
 all_agences = []
 all_controleurs = []
@@ -415,27 +423,34 @@ if col_ctrl and col_ctrl in df_anom.columns:
 
 all_agences = sorted(set(all_agences))
 
-agence_sel = None
-ctrl_sel = None
-
+# ============================================================
+# FILTRES MÉTIER DANS LA SIDEBAR
+# ============================================================
 with st.sidebar:
     st.markdown("---")
     st.header("📋 Filtres Métier")
     
     if all_agences:
-        agence_sel = st.selectbox(
+        st.session_state.agence_sel = st.selectbox(
             "🏢 Agence / Entité :",
             ["🌍 Toutes les agences"] + all_agences,
-            key="agence_filter"
+            key="agence_filter",
+            index=0
         )
-
+    
     if all_controleurs:
-        ctrl_sel = st.multiselect(
+        st.session_state.ctrl_sel = st.multiselect(
             "👤 Contrôleur(s) :",
             all_controleurs,
             key="ctrl_filter"
         )
 
+agence_sel = st.session_state.agence_sel
+ctrl_sel = st.session_state.ctrl_sel
+
+# ============================================================
+# FONCTIONS DE FILTRAGE
+# ============================================================
 def filter_by_agence(df, col):
     if agence_sel and agence_sel != "🌍 Toutes les agences" and col and col in df.columns:
         return df[df[col].astype(str) == agence_sel]
