@@ -287,14 +287,19 @@ with st.sidebar:
 
     st.divider()
 
-    if source_mode == "📂 Fichiers Excel (Import local)":
-        uploaded_files = st.file_uploader(
-            "Déposez les fichiers des contrôleurs (.xlsx) :",
-            type="xlsx",
-            accept_multiple_files=True
-        )
-        if SUPABASE_OK and uploaded_files:
-            st.divider()
+    # --- ZONE D'UPLOAD — toujours visible quel que soit le mode ---
+    st.markdown("📥 **Importation Terrain**")
+    uploaded_files = st.file_uploader(
+        "Déposez les fichiers des contrôleurs (.xlsx) :",
+        type="xlsx",
+        accept_multiple_files=True
+    )
+
+    if source_mode == "☁️ Supabase (Base consolidée)":
+        if not SUPABASE_OK:
+            st.error("❌ Supabase non configuré.\nAjoutez SUPABASE_URL et SUPABASE_KEY dans les secrets.")
+        elif uploaded_files:
+            st.info("📤 Fichiers détectés. Cliquez pour les envoyer dans la base Supabase.")
             if st.button("☁️ Envoyer vers Supabase", use_container_width=True, type="primary"):
                 with st.spinner("Envoi en cours…"):
                     data_tmp = process_consolidation(uploaded_files)
@@ -304,10 +309,8 @@ with st.sidebar:
                 else:
                     st.success("✅ Données envoyées vers Supabase !")
                     load_from_supabase.clear()
-    else:
-        uploaded_files = []
-        if not SUPABASE_OK:
-            st.error("❌ Supabase non configuré.\nAjoutez SUPABASE_URL et SUPABASE_KEY dans les secrets.")
+        else:
+            st.caption("💡 Déposez des fichiers ici pour les ajouter à la base Supabase.")
 
     st.divider()
 
@@ -336,18 +339,31 @@ with st.sidebar:
 # CHARGEMENT DES DONNÉES
 # ============================================================
 if source_mode == "📂 Fichiers Excel (Import local)":
+    # Mode Excel pur : uniquement les fichiers déposés
     if not uploaded_files:
         st.info("👋 Déposez les fichiers de contrôle des filiales pour initialiser le tableau de bord.")
         st.stop()
     data = process_consolidation(uploaded_files)
+
 else:
+    # Mode Supabase : BDD consolidée + fusion optionnelle des fichiers uploadés
     if not SUPABASE_OK:
         st.error("Connexion Supabase non disponible. Vérifiez vos secrets.")
         st.stop()
+
     with st.spinner("Chargement depuis Supabase…"):
         data = load_from_supabase()
+
+    # Si des fichiers sont aussi uploadés, on les fusionne pour prévisualisation
+    if uploaded_files:
+        data_local = process_consolidation(uploaded_files)
+        for key in data:
+            parts = [df for df in [data[key], data_local[key]] if not df.empty]
+            data[key] = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+        st.info(f"👁️ Prévisualisation : données Supabase + {len(uploaded_files)} fichier(s) uploadé(s) (non encore sauvegardés).")
+
     if data["ANOMALIES"].empty and data["MISSIONS"].empty:
-        st.info("📭 La base Supabase est vide. Importez d'abord des fichiers via le mode Excel.")
+        st.info("📭 La base Supabase est vide. Déposez des fichiers dans la sidebar et cliquez sur 'Envoyer vers Supabase'.")
         st.stop()
 
 df_mis  = data["MISSIONS"]
