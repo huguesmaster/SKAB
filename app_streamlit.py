@@ -4,21 +4,16 @@ import plotly.express as px
 import plotly.graph_objects as go
 import io
 import numpy as np
-import logging
 from datetime import datetime, date
 from supabase import create_client, Client
 
 # ============================================================
-# CONFIGURATION LOGGING & PAGE
+# CONFIGURATION DE LA PAGE
 # ============================================================
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
 st.set_page_config(
     page_title="SKAB — Dashboard CI",
     page_icon="🛡️",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
 st.markdown("""
@@ -35,15 +30,6 @@ st.markdown("""
         padding-left: 10px;
         margin-bottom: 12px;
     }
-    .filter-badge {
-        display: inline-block;
-        background-color: #e63946;
-        color: white;
-        padding: 6px 12px;
-        border-radius: 20px;
-        font-size: 12px;
-        margin: 4px 4px 4px 0;
-    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -52,7 +38,12 @@ st.markdown("""
 # ============================================================
 @st.cache_resource
 def init_supabase() -> Client:
-    """Initialise le client Supabase à partir des secrets Streamlit Cloud."""
+    """
+    Initialise le client Supabase à partir des secrets Streamlit Cloud.
+    Configurez dans Settings > Secrets :
+        SUPABASE_URL = "https://xxxx.supabase.co"
+        SUPABASE_KEY = "eyJhbGci..."
+    """
     url  = st.secrets["SUPABASE_URL"]
     key  = st.secrets["SUPABASE_KEY"]
     return create_client(url, key)
@@ -60,173 +51,58 @@ def init_supabase() -> Client:
 try:
     supabase = init_supabase()
     SUPABASE_OK = True
-except Exception as e:
-    logger.error(f"Erreur Supabase : {e}")
+except Exception:
     SUPABASE_OK = False
 
 # ============================================================
-# MOTEUR DE LECTURE DES FICHIERS EXCEL (AMÉLIORÉ)
+# MOTEUR DE LECTURE DES FICHIERS EXCEL
 # ============================================================
-def get_available_sheets(file):
-    """Retourne la liste des feuilles disponibles dans le classeur."""
+def load_and_clean(file, sheet):
     try:
-        xls = pd.ExcelFile(file)
-        logger.info(f"Feuilles trouvées dans {file.name}: {xls.sheet_names}")
-        return xls.sheet_names
-    except Exception as e:
-        logger.error(f"Erreur lecture feuilles ({file.name}): {e}")
-        return []
-
-
-def find_sheet_containing_keyword(file, keywords):
-    """Cherche la première feuille contenant l'un des mots-clés."""
-    sheet_names = get_available_sheets(file)
-    if not sheet_names:
-        logger.warning(f"Aucune feuille trouvée dans {file.name}")
-        return None
-    
-    for sheet in sheet_names:
-        try:
-            df_test = pd.read_excel(file, sheet_name=sheet, header=None, nrows=50)
-            if df_test.empty:
-                continue
-            
-            df_str = df_test.astype(str).values.flatten()
-            for keyword in keywords:
-                if any(keyword.lower() in cell.lower() for cell in df_str):
-                    logger.info(f"Feuille '{sheet}' trouvée (keyword: {keyword})")
-                    return sheet
-        except Exception as e:
-            logger.debug(f"Erreur scanning feuille {sheet}: {e}")
-            continue
-    
-    logger.warning(f"Aucune feuille avec keywords {keywords} trouvée. Utilisation première feuille par défaut.")
-    return sheet_names[0] if sheet_names else None
-
-
-def detect_header_row(df_raw, keywords):
-    """Détecte la ligne d'en-tête avec flexibilité."""
-    if df_raw.empty:
-        return None
-    
-    # Premier pass : chercher les keywords exacts
-    for idx, row in df_raw.iterrows():
-        row_str = [str(val).strip().lower() for val in row.values if pd.notna(val)]
-        for keyword in keywords:
-            if keyword.lower() in ' '.join(row_str):
-                logger.info(f"En-tête trouvé à la ligne {idx} (keyword: {keyword})")
-                return idx
-    
-    # Deuxième pass : chercher "ID", "N°", "Code"
-    for idx, row in df_raw.iterrows():
-        row_str = [str(val).strip().upper() for val in row.values if pd.notna(val)]
-        if any("ID" in s or "N°" in s or "CODE" in s for s in row_str):
-            logger.info(f"En-tête détecté à la ligne {idx} (pattern ID/N°/CODE)")
-            return idx
-    
-    logger.info("Pas d'en-tête détecté, utilisation ligne 0")
-    return 0
-
-
-def load_and_clean(file, keywords, sheet=None):
-    """
-    Charge et nettoie les données depuis une feuille Excel.
-    Plus robuste avec détection fallback et logging détaillé.
-    """
-    try:
-        logger.info(f"Chargement du fichier: {file.name}")
-        
-        # Déterminer la feuille
-        if sheet is None:
-            sheet = find_sheet_containing_keyword(file, keywords)
-            if sheet is None:
-                logger.error(f"Impossible de déterminer la feuille pour {keywords}")
-                return pd.DataFrame()
-        
-        logger.info(f"Lecture de la feuille '{sheet}'...")
-        
-        # Lire toutes les données brutes
-        df_raw = pd.read_excel(file, sheet_name=sheet, header=None, dtype=str)
-        logger.info(f"Données brutes chargées: {df_raw.shape}")
-        
+        df_raw = pd.read_excel(file, sheet_name=sheet, header=None)
         if df_raw.empty:
-            logger.warning(f"Feuille '{sheet}' vide")
             return pd.DataFrame()
 
-        # Déterminer la ligne d'en-tête
-        header_idx = detect_header_row(df_raw, keywords)
+        header_idx = None
+        for idx, row in df_raw.iterrows():
+            row_str = [str(val).strip() for val in row.values]
+            if sheet == "MES_MISSIONS"     and any("N° Mission"  in s for s in row_str): header_idx = idx; break
+            elif sheet == "POINTS_CONTROLE"  and any("ID Point"    in s for s in row_str): header_idx = idx; break
+            elif sheet == "ANOMALIES"        and any("ID Anomalie" in s for s in row_str): header_idx = idx; break
+            elif sheet == "PLANS_ACTION"     and any("ID Plan"     in s for s in row_str): header_idx = idx; break
+
+        if header_idx is None:
+            for idx, row in df_raw.iterrows():
+                row_str = [str(val).strip() for val in row.values]
+                if any("ID" in s or "N°" in s or "Code" in s for s in row_str):
+                    header_idx = idx; break
+
         if header_idx is None:
             header_idx = 0
-        
-        # Relire à partir de la ligne d'en-tête détectée
+
         df = pd.read_excel(file, sheet_name=sheet, skiprows=header_idx)
-        logger.info(f"Données nettoyées: {df.shape} après skiprows={header_idx}")
-        
-        # Normaliser les colonnes
         df.columns = [str(c).strip() for c in df.columns]
-        
-        # Supprimer lignes vides
-        initial_rows = len(df)
-        df = df.dropna(subset=[df.columns[0]], how='all') if not df.empty else df
+        df = df.dropna(subset=[df.columns[0]]) if not df.empty else df
         df = df.dropna(how='all')
-        logger.info(f"Après dropna: {len(df)} lignes (éliminé {initial_rows - len(df)})")
-        
-        # Filtrer lignes "placeholder"
+
         if not df.empty:
             df = df[~df[df.columns[0]].astype(str).str.contains(
-                "Une anomalie|Un plan|Saisissez|Une ligne", na=False, case=False
+                "Une anomalie|Un plan|Saisissez|Une ligne", na=False
             )]
             df['Fichier Source'] = file.name
-            logger.info(f"Données finales: {len(df)} lignes")
 
         return df
-        
-    except Exception as e:
-        logger.error(f"Erreur chargement {file.name}: {type(e).__name__} - {str(e)}", exc_info=True)
+    except Exception:
         return pd.DataFrame()
 
 
 def process_consolidation(files):
-    """Consolide les données de tous les fichiers uploadés."""
     all_data = {"MISSIONS": [], "POINTS": [], "ANOMALIES": [], "PLANS": []}
-    
-    if not files:
-        return all_data
-    
     for f in files:
-        logger.info(f"Traitement du fichier: {f.name}")
-        
-        # Missions
-        df_missions = load_and_clean(f, ["N° Mission", "Mission", "mission", "N°Mission", "Num Mission"])
-        if not df_missions.empty:
-            all_data["MISSIONS"].append(df_missions)
-            logger.info(f"  ✓ {len(df_missions)} missions trouvées")
-        else:
-            logger.info(f"  ✗ Aucune mission trouvée")
-        
-        # Points de contrôle
-        df_points = load_and_clean(f, ["ID Point", "Point de Contrôle", "point", "Point", "ID_Point", "point_control"])
-        if not df_points.empty:
-            all_data["POINTS"].append(df_points)
-            logger.info(f"  ✓ {len(df_points)} points trouvés")
-        else:
-            logger.info(f"  ✗ Aucun point trouvé")
-        
-        # Anomalies
-        df_anomalies = load_and_clean(f, ["ID Anomalie", "Anomalie", "anomalie", "ID_Anomalie", "ID Anom"])
-        if not df_anomalies.empty:
-            all_data["ANOMALIES"].append(df_anomalies)
-            logger.info(f"  ✓ {len(df_anomalies)} anomalies trouvées")
-        else:
-            logger.info(f"  ✗ Aucune anomalie trouvée")
-        
-        # Plans d'action
-        df_plans = load_and_clean(f, ["ID Plan", "Plan", "plan", "ID_Plan", "ID Plan d'action"])
-        if not df_plans.empty:
-            all_data["PLANS"].append(df_plans)
-            logger.info(f"  ✓ {len(df_plans)} plans trouvés")
-        else:
-            logger.info(f"  ✗ Aucun plan trouvé")
+        f.seek(0); all_data["MISSIONS"].append(load_and_clean(f, "MES_MISSIONS"))
+        f.seek(0); all_data["POINTS"].append(load_and_clean(f, "POINTS_CONTROLE"))
+        f.seek(0); all_data["ANOMALIES"].append(load_and_clean(f, "ANOMALIES"))
+        f.seek(0); all_data["PLANS"].append(load_and_clean(f, "PLANS_ACTION"))
 
     return {k: pd.concat(v, ignore_index=True) if v else pd.DataFrame()
             for k, v in all_data.items()}
@@ -241,9 +117,13 @@ def get_safe_len(series, col_name):
 # PUSH VERS SUPABASE
 # ============================================================
 def push_to_supabase(data: dict, source_files):
-    """Pousse les dataframes consolidés vers Supabase."""
+    """
+    Pousse les dataframes consolidés vers Supabase.
+    Adapte les noms de colonnes du template SKAB aux colonnes de la BDD.
+    """
     errors = []
 
+    # --- MISSIONS ---
     df_m = data["MISSIONS"]
     if not df_m.empty:
         col_num   = next((c for c in df_m.columns if 'Mission' in c or 'N°' in c), None)
@@ -269,9 +149,10 @@ def push_to_supabase(data: dict, source_files):
         except Exception as e:
             errors.append(f"Missions : {e}")
 
+    # --- ANOMALIES ---
     df_a = data["ANOMALIES"]
     if not df_a.empty:
-        col_id    = next((c for c in df_a.columns if 'ID Anomalie' in c or 'ID_Anomalie' in c), None)
+        col_id    = next((c for c in df_a.columns if 'ID Anomalie' in c), None)
         col_mis   = next((c for c in df_a.columns if 'Mission'     in c or 'N°' in c), None)
         col_ag    = next((c for c in df_a.columns if 'Agence'      in c or 'Site' in c or 'Entité' in c), None)
         col_pays  = next((c for c in df_a.columns if 'Pays'        in c), None)
@@ -302,9 +183,10 @@ def push_to_supabase(data: dict, source_files):
         except Exception as e:
             errors.append(f"Anomalies : {e}")
 
+    # --- POINTS DE CONTRÔLE ---
     df_p = data["POINTS"]
     if not df_p.empty:
-        col_id   = next((c for c in df_p.columns if 'ID Point' in c or 'ID_Point' in c), None)
+        col_id   = next((c for c in df_p.columns if 'ID Point' in c), None)
         col_mis  = next((c for c in df_p.columns if 'Mission'  in c or 'N°' in c), None)
         col_ag   = next((c for c in df_p.columns if 'Agence'   in c or 'Site' in c), None)
         col_res  = next((c for c in df_p.columns if 'Résultat' in c or 'Result' in c), None)
@@ -323,9 +205,10 @@ def push_to_supabase(data: dict, source_files):
         except Exception as e:
             errors.append(f"Points de contrôle : {e}")
 
+    # --- PLANS D'ACTION ---
     df_pl = data["PLANS"]
     if not df_pl.empty:
-        col_id   = next((c for c in df_pl.columns if 'ID Plan' in c or 'ID_Plan' in c), None)
+        col_id   = next((c for c in df_pl.columns if 'ID Plan'     in c), None)
         col_anom = next((c for c in df_pl.columns if 'Anomalie'    in c), None)
         col_ag   = next((c for c in df_pl.columns if 'Agence'      in c or 'Site' in c), None)
         col_resp = next((c for c in df_pl.columns if 'Responsable' in c), None)
@@ -388,7 +271,7 @@ def load_from_supabase():
     }
 
 # ============================================================
-# INTERFACE — BARRE LATÉRALE (RESTRUCTURÉE)
+# INTERFACE — BARRE LATÉRALE
 # ============================================================
 st.title("🛡️ Espace Chef de Département CI — Groupe SKAB")
 st.subheader("Pilotage, Validation Métier et Consolidation des Missions 2026")
@@ -404,7 +287,7 @@ with st.sidebar:
 
     st.divider()
 
-    # --- ZONE D'UPLOAD ---
+    # --- ZONE D'UPLOAD — toujours visible quel que soit le mode ---
     st.markdown("📥 **Importation Terrain**")
     uploaded_files = st.file_uploader(
         "Déposez les fichiers des contrôleurs (.xlsx) :",
@@ -414,9 +297,9 @@ with st.sidebar:
 
     if source_mode == "☁️ Supabase (Base consolidée)":
         if not SUPABASE_OK:
-            st.error("❌ Supabase non configuré.")
+            st.error("❌ Supabase non configuré.\nAjoutez SUPABASE_URL et SUPABASE_KEY dans les secrets.")
         elif uploaded_files:
-            st.info("📤 Fichiers détectés. Envoyer vers Supabase ?")
+            st.info("📤 Fichiers détectés. Cliquez pour les envoyer dans la base Supabase.")
             if st.button("☁️ Envoyer vers Supabase", use_container_width=True, type="primary"):
                 with st.spinner("Envoi en cours…"):
                     data_tmp = process_consolidation(uploaded_files)
@@ -424,32 +307,31 @@ with st.sidebar:
                 if errs:
                     for e in errs: st.error(e)
                 else:
-                    st.success("✅ Données envoyées !")
+                    st.success("✅ Données envoyées vers Supabase !")
                     load_from_supabase.clear()
+        else:
+            st.caption("💡 Déposez des fichiers ici pour les ajouter à la base Supabase.")
 
     st.divider()
 
-    # --- FILTRES (COLLAPSIBLE) ---
-    with st.expander("🔎 **Filtres Avancés**", expanded=True):
-        
-        # Période
-        periode_type = st.selectbox("Période", ["Toutes les données", "Mois", "Trimestre", "Année"])
-        periode_val  = None
+    # --- FILTRES GLOBAUX ---
+    st.header("🔎 Filtres globaux")
 
-        if periode_type == "Mois":
-            periode_val = st.selectbox("Choisir le mois :", [
-                "Janvier","Février","Mars","Avril","Mai","Juin",
-                "Juillet","Août","Septembre","Octobre","Novembre","Décembre"
-            ], key="mois_filter")
-        elif periode_type == "Trimestre":
-            periode_val = st.selectbox("Choisir le trimestre :", 
-                ["T1 (Jan-Mar)","T2 (Avr-Jun)","T3 (Jul-Sep)","T4 (Oct-Déc)"], key="trim_filter")
-        elif periode_type == "Année":
-            periode_val = st.selectbox("Choisir l'année :", 
-                [str(y) for y in range(2023, 2028)], key="year_filter")
+    # Période
+    periode_type = st.selectbox("Période", ["Toutes les données", "Mois", "Trimestre", "Année"])
+    periode_val  = None
+
+    if periode_type == "Mois":
+        periode_val = st.selectbox("Choisir le mois :", [
+            "Janvier","Février","Mars","Avril","Mai","Juin",
+            "Juillet","Août","Septembre","Octobre","Novembre","Décembre"
+        ])
+    elif periode_type == "Trimestre":
+        periode_val = st.selectbox("Choisir le trimestre :", ["T1 (Jan-Mar)","T2 (Avr-Jun)","T3 (Jul-Sep)","T4 (Oct-Déc)"])
+    elif periode_type == "Année":
+        periode_val = st.selectbox("Choisir l'année :", [str(y) for y in range(2023, 2028)])
 
     st.divider()
-    
     st.caption("Direction de l'Audit & Contrôle Interne")
     st.caption("© 2026 Groupe SKAB Nutrition")
 
@@ -457,44 +339,14 @@ with st.sidebar:
 # CHARGEMENT DES DONNÉES
 # ============================================================
 if source_mode == "📂 Fichiers Excel (Import local)":
+    # Mode Excel pur : uniquement les fichiers déposés
     if not uploaded_files:
         st.info("👋 Déposez les fichiers de contrôle des filiales pour initialiser le tableau de bord.")
         st.stop()
-    
-    st.write("🔍 **Fichiers en traitement :**")
-    for f in uploaded_files:
-        st.write(f"- {f.name} ({f.size} bytes)")
-    
-    with st.spinner("Chargement et consolidation des données..."):
-        data = process_consolidation(uploaded_files)
-        
-        # Afficher les logs dans un expander
-        with st.expander("📋 Détails du traitement", expanded=False):
-            st.info("✓ Vérifiez les logs ci-dessus pour les détails du chargement.")
-    
-    # Afficher un résumé
-    st.divider()
-    st.write("📊 **Résumé du chargement :**")
-    col_s1, col_s2, col_s3, col_s4 = st.columns(4)
-    col_s1.metric("Missions", len(data["MISSIONS"]))
-    col_s2.metric("Anomalies", len(data["ANOMALIES"]))
-    col_s3.metric("Points", len(data["POINTS"]))
-    col_s4.metric("Plans", len(data["PLANS"]))
-    st.divider()
-    
-    # Vérifier si les données sont vides
-    if data["ANOMALIES"].empty and data["MISSIONS"].empty and data["POINTS"].empty and data["PLANS"].empty:
-        st.error("❌ Aucune donnée n'a pu être extraite.")
-        st.info("💡 **Vérifications à faire :**")
-        st.markdown("""
-        - Les noms de colonnes contiennent-ils : **Mission, Anomalie, Point, Plan** ?
-        - Y a-t-il une **ligne d'en-tête** bien définie ?
-        - Le fichier Excel n'a-t-il pas de **lignes vides au début** ?
-        - Les **noms de feuilles** sont-ils standards (ex: "Données", "Sheet1") ?
-        """)
-        st.stop()
-    
+    data = process_consolidation(uploaded_files)
+
 else:
+    # Mode Supabase : BDD consolidée + fusion optionnelle des fichiers uploadés
     if not SUPABASE_OK:
         st.error("Connexion Supabase non disponible. Vérifiez vos secrets.")
         st.stop()
@@ -502,15 +354,16 @@ else:
     with st.spinner("Chargement depuis Supabase…"):
         data = load_from_supabase()
 
+    # Si des fichiers sont aussi uploadés, on les fusionne pour prévisualisation
     if uploaded_files:
         data_local = process_consolidation(uploaded_files)
         for key in data:
             parts = [df for df in [data[key], data_local[key]] if not df.empty]
             data[key] = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
-        st.info(f"👁️ Prévisualisation : données Supabase + {len(uploaded_files)} fichier(s) uploadé(s).")
+        st.info(f"👁️ Prévisualisation : données Supabase + {len(uploaded_files)} fichier(s) uploadé(s) (non encore sauvegardés).")
 
     if data["ANOMALIES"].empty and data["MISSIONS"].empty:
-        st.info("📭 La base Supabase est vide. Déposez des fichiers et envoyez-les.")
+        st.info("📭 La base Supabase est vide. Déposez des fichiers dans la sidebar et cliquez sur 'Envoyer vers Supabase'.")
         st.stop()
 
 df_mis  = data["MISSIONS"]
@@ -519,8 +372,9 @@ df_anom = data["ANOMALIES"]
 df_plan = data["PLANS"]
 
 # ============================================================
-# NORMALISATION DES COLONNES
+# NORMALISATION DES COLONNES (compatibilité Excel ↔ Supabase)
 # ============================================================
+# On mappe les noms de colonnes Supabase vers des alias communs
 COL_MAP = {
     "impact":    ["Impact","impact_financier","Impact Financier"],
     "criticite": ["Criticité","criticite","Criticite","Niveau de Criticité"],
@@ -532,7 +386,6 @@ COL_MAP = {
     "conformite":["Taux de Conformité","taux_conformite","conform","Conformité"],
     "num_mis":   ["N° Mission","num_mission","Mission"],
     "id_anom":   ["ID Anomalie","id_anomalie"],
-    "controleur":["Contrôleur","controleur","Agent","agent","Auditeur","auditeur"],
 }
 
 def find_col(df, key):
@@ -548,69 +401,29 @@ col_pays    = find_col(df_anom, "pays")
 col_ag_a    = find_col(df_anom, "agence")
 col_stat_a  = find_col(df_anom, "statut")
 col_date_a  = find_col(df_anom, "date")
-col_ctrl    = find_col(df_anom, "controleur")
 col_tx_conf = find_col(df_mis,  "conformite")
 col_ag_m    = find_col(df_mis,  "agence")
 
 # ============================================================
-# INITIALISER LES VARIABLES DE FILTRE DANS SESSION STATE
-# ============================================================
-if "agence_sel" not in st.session_state:
-    st.session_state.agence_sel = None
-if "ctrl_sel" not in st.session_state:
-    st.session_state.ctrl_sel = []
-
-# ============================================================
-# RÉCUPÉRER LES VALEURS DISPONIBLES
+# FILTRE PAR AGENCE (dynamique selon les données disponibles)
 # ============================================================
 all_agences = []
-all_controleurs = []
-
-for df in [df_anom, df_mis]:
-    if col_ag_a and col_ag_a in df.columns:
-        all_agences += df[col_ag_a].dropna().astype(str).unique().tolist()
-
-if col_ctrl and col_ctrl in df_anom.columns:
-    all_controleurs = sorted(df_anom[col_ctrl].dropna().astype(str).unique().tolist())
-
+for df, col in [(df_anom, col_ag_a), (df_mis, col_ag_m)]:
+    if col and not df.empty:
+        all_agences += df[col].dropna().astype(str).unique().tolist()
 all_agences = sorted(set(all_agences))
 
-# ============================================================
-# FILTRES MÉTIER DANS LA SIDEBAR
-# ============================================================
-with st.sidebar:
-    st.markdown("---")
-    st.header("📋 Filtres Métier")
-    
-    if all_agences:
-        st.session_state.agence_sel = st.selectbox(
-            "🏢 Agence / Entité :",
-            ["🌍 Toutes les agences"] + all_agences,
-            key="agence_filter",
-            index=0
-        )
-    
-    if all_controleurs:
-        st.session_state.ctrl_sel = st.multiselect(
-            "👤 Contrôleur(s) :",
-            all_controleurs,
-            key="ctrl_filter"
+agence_sel = None
+if all_agences:
+    with st.sidebar:
+        agence_sel = st.selectbox(
+            "🏢 Filtrer par Agence / Entité :",
+            ["Toutes les agences"] + all_agences
         )
 
-agence_sel = st.session_state.agence_sel
-ctrl_sel = st.session_state.ctrl_sel
-
-# ============================================================
-# FONCTIONS DE FILTRAGE
-# ============================================================
 def filter_by_agence(df, col):
-    if agence_sel and agence_sel != "🌍 Toutes les agences" and col and col in df.columns:
+    if agence_sel and agence_sel != "Toutes les agences" and col and col in df.columns:
         return df[df[col].astype(str) == agence_sel]
-    return df
-
-def filter_by_controleurs(df, col):
-    if ctrl_sel and col and col in df.columns:
-        return df[df[col].astype(str).isin(ctrl_sel)]
     return df
 
 # ============================================================
@@ -640,318 +453,373 @@ def filter_by_period(df, col_date):
     return df.drop(columns=["_date_parsed"])
 
 # Appliquer les filtres
-df_anom_f = filter_by_agence(filter_by_period(filter_by_controleurs(df_anom, col_ctrl), col_date_a), col_ag_a)
+df_anom_f = filter_by_agence(filter_by_period(df_anom, col_date_a), col_ag_a)
 df_mis_f  = filter_by_agence(df_mis, col_ag_m)
 
 # ============================================================
 # BADGE DE FILTRES ACTIFS
 # ============================================================
 filtres_actifs = []
-if agence_sel and agence_sel != "🌍 Toutes les agences": 
-    filtres_actifs.append(f"🏢 {agence_sel}")
-if ctrl_sel: 
-    filtres_actifs.append(f"👤 {len(ctrl_sel)} contrôleur(s)")
-if periode_type != "Toutes les données":              
-    filtres_actifs.append(f"📅 {periode_type} : {periode_val}")
+if agence_sel and agence_sel != "Toutes les agences": filtres_actifs.append(f"🏢 {agence_sel}")
+if periode_type != "Toutes les données":              filtres_actifs.append(f"📅 {periode_type} : {periode_val}")
 
 if filtres_actifs:
-    st.markdown("**Filtres appliqués :** " + " | ".join(filtres_actifs))
-    st.divider()
+    st.info("**Filtres actifs :** " + " | ".join(filtres_actifs))
 
 # ============================================================
-# INTERFACE AVEC ONGLETS (TAB-BASED)
+# KPI PRINCIPAUX
 # ============================================================
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📊 Vue d'Ensemble",
-    "🔴 Anomalies EN COURS",
-    "🏢 Par Agence",
-    "📅 Tendances",
-    "🛠️ Diagnostic"
-])
+st.markdown("### 📊 Indicateurs de Risques")
+k1, k2, k3, k4, k5 = st.columns(5)
 
-# ============================================================
-# TAB 1 : VUE D'ENSEMBLE
-# ============================================================
-with tab1:
-    st.markdown("### 📊 Indicateurs Clés de Risque")
-    k1, k2, k3, k4 = st.columns(4)
+with k1:
+    impact_total = 0
+    if col_impact and not df_anom_f.empty:
+        impact_total = pd.to_numeric(df_anom_f[col_impact], errors='coerce').fillna(0).sum()
+    st.metric("Risque Financier Cumulé", f"{impact_total:,.0f} FCFA")
 
-    with k1:
-        impact_total = 0
-        if col_impact and not df_anom_f.empty:
-            impact_total = pd.to_numeric(df_anom_f[col_impact], errors='coerce').fillna(0).sum()
-        st.metric("💰 Risque Financier", f"{impact_total:,.0f} FCFA")
+with k2:
+    nb_critiques = 0
+    if col_crit and not df_anom_f.empty:
+        nb_critiques = df_anom_f[df_anom_f[col_crit].astype(str).str.contains('Critique|🔴', na=False)].shape[0]
+    st.metric("Anomalies Critiques", nb_critiques,
+              delta="Action urgente" if nb_critiques > 0 else None, delta_color="inverse")
 
-    with k2:
-        nb_critiques = 0
-        if col_crit and not df_anom_f.empty:
-            nb_critiques = df_anom_f[df_anom_f[col_crit].astype(str).str.contains('Critique|🔴', na=False)].shape[0]
-        st.metric("🔴 Critiques", nb_critiques, 
-                  delta="⚠️ Urgent" if nb_critiques > 0 else "✅ OK", delta_color="inverse")
+with k3:
+    conformite_moyenne = 0
+    if col_tx_conf and not df_mis_f.empty:
+        raw_mean = pd.to_numeric(df_mis_f[col_tx_conf], errors='coerce').mean()
+        if pd.notna(raw_mean):
+            conformite_moyenne = raw_mean * 100 if raw_mean <= 1.0 else raw_mean
+    st.metric("Taux de Conformité Moyen", f"{conformite_moyenne:.1f}%" if conformite_moyenne > 0 else "N/A")
 
-    with k3:
-        conformite_moyenne = 0
-        if col_tx_conf and not df_mis_f.empty:
-            raw_mean = pd.to_numeric(df_mis_f[col_tx_conf], errors='coerce').mean()
-            if pd.notna(raw_mean):
-                conformite_moyenne = raw_mean * 100 if raw_mean <= 1.0 else raw_mean
-        st.metric("✅ Conformité", f"{conformite_moyenne:.1f}%" if conformite_moyenne > 0 else "N/A")
+with k4:
+    # ── NOUVEAU KPI : Anomalies EN COURS ──
+    nb_en_cours = 0
+    if col_stat_a and not df_anom_f.empty:
+        nb_en_cours = df_anom_f[df_anom_f[col_stat_a].astype(str).str.upper().str.contains('EN COURS', na=False)].shape[0]
+    st.metric("Anomalies EN COURS", nb_en_cours,
+              delta="À surveiller" if nb_en_cours > 0 else None, delta_color="inverse")
 
-    with k4:
-        nb_en_cours = 0
-        if col_stat_a and not df_anom_f.empty:
-            nb_en_cours = df_anom_f[df_anom_f[col_stat_a].astype(str).str.upper().str.contains('EN COURS', na=False)].shape[0]
-        st.metric("⏳ EN COURS", nb_en_cours, delta="À surveiller" if nb_en_cours > 0 else None)
+with k5:
+    nb_fichiers = len(uploaded_files) if source_mode == "📂 Fichiers Excel (Import local)" else "☁️ BDD"
+    st.metric("Source", nb_fichiers)
 
-    st.divider()
-
-    # Graphiques principaux
-    g1, g2 = st.columns(2)
-
-    with g1:
-        st.markdown('<div class="section-title">📊 Anomalies par Domaine</div>', unsafe_allow_html=True)
-        if not df_anom_f.empty and col_domaine:
-            df_dom = df_anom_f.dropna(subset=[col_domaine])
-            color_map = {
-                '🔴 Critique':'#e63946','Critique':'#e63946',
-                '🟠 Majeur':'#f4a261','Majeur':'#f4a261',
-                '🟡 Mineur':'#e9c46a','Mineur':'#e9c46a',
-                '🟢 Faible':'#2a9d8f','Faible':'#2a9d8f'
-            }
-            fig = px.bar(df_dom, x=col_domaine, color=col_crit if col_crit else None,
-                         barmode='group', color_discrete_map=color_map)
-            fig.update_layout(height=300, margin=dict(l=0,r=0,t=20,b=0),
-                              xaxis_title=None, yaxis_title="Nombre", plot_bgcolor='rgba(0,0,0,0)')
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Aucune donnée")
-
-    with g2:
-        st.markdown('<div class="section-title">🌍 Distribution par Pays</div>', unsafe_allow_html=True)
-        if not df_anom_f.empty and col_pays:
-            df_pays = df_anom_f.dropna(subset=[col_pays]).groupby(col_pays).size().reset_index(name="Nb")
-            fig = px.pie(df_pays, values="Nb", names=col_pays, hole=0.4)
-            fig.update_layout(height=300, margin=dict(l=0,r=0,t=20,b=0))
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Aucune donnée")
+st.divider()
 
 # ============================================================
-# TAB 2 : ANOMALIES EN COURS
+# GRAPHIQUES STANDARDS
 # ============================================================
-with tab2:
-    if not df_anom_f.empty and col_stat_a:
-        df_en_cours = df_anom_f[df_anom_f[col_stat_a].astype(str).str.upper().str.contains("EN COURS", na=False)].copy()
+g1, g2 = st.columns(2)
 
-        if df_en_cours.empty:
-            st.success("✅ Aucune anomalie EN COURS pour ce filtre.")
-        else:
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Total EN COURS", len(df_en_cours))
-            impact_ec = pd.to_numeric(df_en_cours[col_impact], errors='coerce').fillna(0).sum() if col_impact else 0
-            c2.metric("Impact EN COURS", f"{impact_ec:,.0f} FCFA")
-            if col_crit:
-                nb_crit = df_en_cours[df_en_cours[col_crit].astype(str).str.contains('Critique|🔴', na=False)].shape[0]
-                c3.metric("Critiques", nb_crit)
-
-            st.divider()
-
-            # Graphe tendance
-            if col_date_a and col_date_a in df_en_cours.columns:
-                df_ec_tmp = df_en_cours.copy()
-                df_ec_tmp["_mois"] = pd.to_datetime(df_ec_tmp[col_date_a], errors="coerce").dt.to_period("M").astype(str)
-                df_trend = df_ec_tmp.dropna(subset=["_mois"]).groupby("_mois").size().reset_index(name="Nb")
-                if not df_trend.empty:
-                    fig = px.line(df_trend, x="_mois", y="Nb", markers=True, title="Tendance des EN COURS")
-                    fig.update_layout(height=280, margin=dict(l=0,r=0,t=40,b=0), plot_bgcolor='rgba(0,0,0,0)')
-                    st.plotly_chart(fig, use_container_width=True)
-
-            st.markdown("**📋 Liste détaillée :**")
-            cols_show = [c for c in [
-                find_col(df_en_cours, "id_anom"), col_ctrl, col_ag_a, col_crit, col_domaine, col_impact
-            ] if c and c in df_en_cours.columns]
-            
-            st.dataframe(df_en_cours[cols_show] if cols_show else df_en_cours, 
-                        hide_index=True, use_container_width=True, height=300)
-
-            csv = df_en_cours.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                "⬇️ Exporter EN COURS (.csv)",
-                data=csv,
-                file_name=f"SKAB_EN_COURS_{date.today()}.csv",
-                mime="text/csv"
-            )
+with g1:
+    st.markdown('<div class="section-title">🔍 Volume d\'Anomalies par Domaine</div>', unsafe_allow_html=True)
+    if not df_anom_f.empty and col_domaine:
+        df_graph1 = df_anom_f.dropna(subset=[col_domaine])
+        color_opt = {
+            '🔴 Critique':'#e63946','Critique':'#e63946',
+            '🟠 Majeur':'#f4a261','Majeur':'#f4a261',
+            '🟡 Mineur':'#e9c46a','Mineur':'#e9c46a',
+            '🟢 Faible':'#2a9d8f','Faible':'#2a9d8f'
+        }
+        fig = px.bar(df_graph1, x=col_domaine, color=col_crit if col_crit else None,
+                     barmode='group', color_discrete_map=color_opt)
+        fig.update_layout(height=350, margin=dict(l=0,r=0,t=20,b=0),
+                          xaxis_title=None, yaxis_title="Nombre d'écarts",
+                          plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("Aucune colonne 'Statut' détectée.")
+        st.info("Aucune anomalie détectée pour ce filtre.")
 
-# ============================================================
-# TAB 3 : ANALYSE PAR AGENCE
-# ============================================================
-with tab3:
-    agences_dispo = []
-    if col_ag_a and not df_anom.empty:
-        agences_dispo = sorted(df_anom[col_ag_a].dropna().astype(str).unique().tolist())
-
-    if not agences_dispo:
-        st.info("Aucune colonne Agence détectée.")
+with g2:
+    st.markdown('<div class="section-title">🌍 Alertes par Pays / Entité</div>', unsafe_allow_html=True)
+    if not df_anom_f.empty and col_pays:
+        df_pays_s = df_anom_f.dropna(subset=[col_pays]).groupby(col_pays).size().reset_index(name="Anomalies")
+        fig = px.pie(df_pays_s, values="Anomalies", names=col_pays,
+                     hole=.4, color_discrete_sequence=px.colors.qualitative.Safe)
+        fig.update_layout(height=350, margin=dict(l=0,r=0,t=20,b=0))
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        ag_sel = st.selectbox("Sélectionner une agence :", agences_dispo, key="ag_detail_tab")
-        df_ag = df_anom_f[df_anom_f[col_ag_a].astype(str) == ag_sel].copy() if col_ag_a else df_anom_f.copy()
+        st.info("Aucune donnée géographique à cartographier.")
 
-        a1, a2, a3, a4 = st.columns(4)
-        a1.metric("Total", len(df_ag))
-        if col_crit:
-            nb_crit = df_ag[df_ag[col_crit].astype(str).str.contains('Critique|🔴', na=False)].shape[0]
-            a2.metric("Critiques", nb_crit)
-        if col_stat_a:
-            nb_ec = df_ag[df_ag[col_stat_a].astype(str).str.upper().str.contains('EN COURS', na=False)].shape[0]
-            a3.metric("EN COURS", nb_ec)
+st.divider()
+
+# ============================================================
+# ██  NOUVEAU BLOC 1 : ANOMALIES "EN COURS"
+# ============================================================
+st.markdown("### 🔴 Suivi des Anomalies EN COURS")
+
+if not df_anom_f.empty and col_stat_a:
+    df_en_cours = df_anom_f[df_anom_f[col_stat_a].astype(str).str.upper().str.contains("EN COURS", na=False)].copy()
+
+    if df_en_cours.empty:
+        st.success("✅ Aucune anomalie avec statut EN COURS pour ce filtre.")
+    else:
+        nb = len(df_en_cours)
+        impact_ec = 0
         if col_impact:
-            impact = pd.to_numeric(df_ag[col_impact], errors='coerce').fillna(0).sum()
-            a4.metric("Impact", f"{impact:,.0f} FCFA")
+            impact_ec = pd.to_numeric(df_en_cours[col_impact], errors='coerce').fillna(0).sum()
 
-        st.divider()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total EN COURS", nb)
+        c2.metric("Impact financier EN COURS", f"{impact_ec:,.0f} FCFA")
+        if col_crit:
+            nb_crit_ec = df_en_cours[df_en_cours[col_crit].astype(str).str.contains('Critique|🔴', na=False)].shape[0]
+            c3.metric("Dont Critiques EN COURS", nb_crit_ec)
 
-        # Graphe domaines
-        if col_domaine and not df_ag.empty:
-            df_dom_ag = df_ag.dropna(subset=[col_domaine]).groupby(col_domaine).size().reset_index(name="Nb")
-            if not df_dom_ag.empty:
-                fig = px.bar_polar(df_dom_ag, r="Nb", theta=col_domaine, color="Nb", 
-                                   color_continuous_scale="Reds", title=f"Profil — {ag_sel}")
-                fig.update_layout(height=350, margin=dict(l=0,r=0,t=50,b=0))
-                st.plotly_chart(fig, use_container_width=True)
+        # Graphe évolution des anomalies EN COURS dans le temps (si date disponible)
+        if col_date_a and col_date_a in df_en_cours.columns:
+            df_en_cours["_mois"] = pd.to_datetime(df_en_cours[col_date_a], errors="coerce").dt.to_period("M").astype(str)
+            df_trend = df_en_cours.dropna(subset=["_mois"]).groupby("_mois").size().reset_index(name="Nb EN COURS")
+            if not df_trend.empty:
+                fig_trend = px.line(df_trend, x="_mois", y="Nb EN COURS",
+                                    markers=True, title="Évolution mensuelle des anomalies EN COURS",
+                                    color_discrete_sequence=["#e63946"])
+                fig_trend.update_layout(height=280, margin=dict(l=0,r=0,t=40,b=0),
+                                        xaxis_title="Mois", plot_bgcolor='rgba(0,0,0,0)')
+                st.plotly_chart(fig_trend, use_container_width=True)
 
-        st.markdown("**📋 Tableau détaillé :**")
-        cols_ag = [c for c in [find_col(df_ag, "id_anom"), col_ctrl, col_crit, col_domaine, col_impact, col_stat_a] 
-                   if c and c in df_ag.columns]
-        st.dataframe(df_ag[cols_ag] if cols_ag else df_ag, hide_index=True, use_container_width=True, height=300)
+        # Tableau détaillé
+        st.markdown("**📋 Liste détaillée :**")
+        cols_ec = [c for c in [
+            find_col(df_en_cours, "id_anom"),
+            col_ag_a, col_pays, col_crit, col_domaine,
+            find_col(df_en_cours, "date"), col_impact,
+            next((c for c in df_en_cours.columns if 'Description' in c or 'description' in c), None)
+        ] if c and c in df_en_cours.columns]
 
-# ============================================================
-# TAB 4 : TENDANCES
-# ============================================================
-with tab4:
-    if col_date_a and not df_anom_f.empty:
-        df_per = df_anom_f.copy()
-        df_per["_date"] = pd.to_datetime(df_per[col_date_a], errors="coerce")
-        df_per = df_per.dropna(subset=["_date"])
+        # Coloration conditionnelle selon criticité
+        def color_crit(val):
+            val = str(val)
+            if   'Critique' in val or '🔴' in val: return 'background-color:#ffe0e0'
+            elif 'Majeur'   in val or '🟠' in val: return 'background-color:#fff3e0'
+            elif 'Mineur'   in val or '🟡' in val: return 'background-color:#fffde7'
+            return ''
 
-        if df_per.empty:
-            st.info("Aucune date valide.")
+        df_show = df_en_cours[cols_ec] if cols_ec else df_en_cours
+        if col_crit and col_crit in df_show.columns:
+            st.dataframe(
+                df_show.style.map(color_crit, subset=[col_crit]) if hasattr(df_show.style, 'map') else df_show.style.applymap(color_crit, subset=[col_crit]),
+                hide_index=True, use_container_width=True, height=350
+            )
         else:
-            df_per["Mois"] = df_per["_date"].dt.strftime("%Y-%m")
-            p_type = st.radio("Granularité :", ["Mois", "Trimestre", "Année"], horizontal=True)
+            st.dataframe(df_show, hide_index=True, use_container_width=True, height=350)
 
-            if p_type == "Mois":
-                df_grp = df_per.groupby("Mois").size().reset_index(name="Nb").sort_values("Mois")
-                col_p = "Mois"
-            else:
-                df_per["Trim"] = "T" + df_per["_date"].dt.quarter.astype(str) + "-" + df_per["_date"].dt.year.astype(str)
-                df_grp = df_per.groupby("Trim").size().reset_index(name="Nb")
-                col_p = "Trim"
+        # Export CSV des EN COURS
+        csv_ec = df_en_cours.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "⬇️ Exporter les anomalies EN COURS (.csv)",
+            data=csv_ec,
+            file_name=f"SKAB_anomalies_EN_COURS_{date.today()}.csv",
+            mime="text/csv"
+        )
+else:
+    st.info("Aucune colonne 'Statut' détectée dans les anomalies.")
 
-            p1, p2 = st.columns(2)
-            with p1:
-                fig_p1 = px.bar(df_grp, x=col_p, y="Nb", title="Nombre d'anomalies")
-                fig_p1.update_layout(height=300, plot_bgcolor='rgba(0,0,0,0)')
-                st.plotly_chart(fig_p1, use_container_width=True)
+st.divider()
 
-            with p2:
-                if col_impact:
-                    df_impact = df_per.groupby(col_p if p_type == "Mois" else "Trim").apply(
-                        lambda x: pd.to_numeric(x[col_impact], errors='coerce').sum()
-                    ).reset_index(name="Impact")
-                    df_impact.columns = [col_p, "Impact"] if p_type == "Mois" else ["Trim", "Impact"]
-                    fig_p2 = px.line(df_impact, x=df_impact.columns[0], y="Impact", markers=True, 
-                                    title="Impact financier")
-                    fig_p2.update_layout(height=300, plot_bgcolor='rgba(0,0,0,0)')
-                    st.plotly_chart(fig_p2, use_container_width=True)
+# ============================================================
+# ██  NOUVEAU BLOC 2 : CONSULTATION PAR AGENCE
+# ============================================================
+st.markdown("### 🏢 Analyse par Agence / Entité")
+
+agences_dispo = []
+if col_ag_a and not df_anom.empty:
+    agences_dispo = sorted(df_anom[col_ag_a].dropna().astype(str).unique().tolist())
+
+if not agences_dispo:
+    st.info("Aucune colonne Agence/Site détectée dans les anomalies.")
+else:
+    ag_tab = st.selectbox("Sélectionner une agence pour l'analyse détaillée :", agences_dispo, key="ag_detail")
+    df_ag = df_anom[df_anom[col_ag_a].astype(str) == ag_tab].copy()
+
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric("Anomalies totales", len(df_ag))
+
+    nb_crit_ag = 0
+    if col_crit:
+        nb_crit_ag = df_ag[df_ag[col_crit].astype(str).str.contains('Critique|🔴', na=False)].shape[0]
+    a2.metric("Dont Critiques", nb_crit_ag)
+
+    nb_ec_ag = 0
+    if col_stat_a:
+        nb_ec_ag = df_ag[df_ag[col_stat_a].astype(str).str.upper().str.contains('EN COURS', na=False)].shape[0]
+    a3.metric("EN COURS", nb_ec_ag)
+
+    impact_ag = 0
+    if col_impact:
+        impact_ag = pd.to_numeric(df_ag[col_impact], errors='coerce').fillna(0).sum()
+    a4.metric("Impact Financier", f"{impact_ag:,.0f} FCFA")
+
+    # Graphe radar des domaines pour cette agence
+    if col_domaine and not df_ag.empty:
+        df_dom_ag = df_ag.dropna(subset=[col_domaine]).groupby(col_domaine).size().reset_index(name="Nb")
+        if not df_dom_ag.empty:
+            fig_ag = px.bar_polar(df_dom_ag, r="Nb", theta=col_domaine,
+                                  color="Nb", color_continuous_scale="Reds",
+                                  title=f"Profil d'anomalies — {ag_tab}")
+            fig_ag.update_layout(height=380, margin=dict(l=0,r=0,t=50,b=0))
+            st.plotly_chart(fig_ag, use_container_width=True)
+
+    st.markdown(f"**📋 Toutes les anomalies de {ag_tab} :**")
+    st.dataframe(df_ag, hide_index=True, use_container_width=True, height=300)
+
+st.divider()
+
+# ============================================================
+# ██  NOUVEAU BLOC 3 : CONSULTATION PÉRIODIQUE
+# ============================================================
+st.markdown("### 📅 Analyse Périodique")
+
+if col_date_a and not df_anom.empty:
+    df_per = df_anom.copy()
+    df_per["_date"] = pd.to_datetime(df_per[col_date_a], errors="coerce")
+    df_per = df_per.dropna(subset=["_date"])
+
+    if df_per.empty:
+        st.info("Aucune date valide trouvée dans les anomalies.")
     else:
-        st.info("Aucune date disponible.")
+        df_per["Mois"]      = df_per["_date"].dt.strftime("%Y-%m")
+        df_per["Trimestre"] = "T" + df_per["_date"].dt.quarter.astype(str) + " " + df_per["_date"].dt.year.astype(str)
+        df_per["Année"]     = df_per["_date"].dt.year.astype(str)
+
+        p_type = st.radio("Granularité :", ["Mois","Trimestre","Année"], horizontal=True, key="period_radio")
+
+        df_grp = df_per.groupby(p_type).agg(
+            Nb_Anomalies=(col_impact if col_impact else df_per.columns[0], "count"),
+            **({ "Impact_Total": (col_impact, lambda x: pd.to_numeric(x, errors='coerce').sum()) } if col_impact else {})
+        ).reset_index().sort_values(p_type)
+
+        col_p1, col_p2 = st.columns(2)
+
+        with col_p1:
+            fig_p1 = px.bar(df_grp, x=p_type, y="Nb_Anomalies",
+                            title=f"Nombre d'anomalies par {p_type.lower()}",
+                            color_discrete_sequence=["#1d3557"])
+            fig_p1.update_layout(height=300, margin=dict(l=0,r=0,t=40,b=0), plot_bgcolor='rgba(0,0,0,0)')
+            st.plotly_chart(fig_p1, use_container_width=True)
+
+        with col_p2:
+            if col_impact and "Impact_Total" in df_grp.columns:
+                fig_p2 = px.line(df_grp, x=p_type, y="Impact_Total", markers=True,
+                                 title=f"Impact financier cumulé par {p_type.lower()}",
+                                 color_discrete_sequence=["#e63946"])
+                fig_p2.update_layout(height=300, margin=dict(l=0,r=0,t=40,b=0), plot_bgcolor='rgba(0,0,0,0)')
+                st.plotly_chart(fig_p2, use_container_width=True)
+            else:
+                st.info("Colonne d'impact financier non détectée.")
+
+        st.markdown(f"**📋 Synthèse par {p_type.lower()} :**")
+        st.dataframe(df_grp, hide_index=True, use_container_width=True)
+
+else:
+    st.info("Aucune colonne de date détectée dans les anomalies pour l'analyse périodique.")
+
+st.divider()
 
 # ============================================================
-# TAB 5 : DIAGNOSTIC
+# DIAGNOSTIC QUALITÉ
 # ============================================================
-with tab5:
-    st.markdown("### 🛠️ Diagnostic Qualité")
+st.markdown("### 🛠️ Diagnostic Qualité des Données")
+q1, q2 = st.columns([1, 1])
 
-    alertes = []
-    
+with q1:
+    st.markdown("**🚨 Incohérences détectées**")
+    alertes_qualite = []
+    col_num_mis_m = find_col(df_mis,  "num_mis")
+    col_num_mis_p = find_col(df_pts,  "num_mis")
+
     if not df_anom_f.empty and col_crit and col_impact:
-        lignes_anom = df_anom_f[
+        lignes_anormales = df_anom_f[
             (df_anom_f[col_crit].astype(str).str.contains('Critique|🔴|Majeur|🟠', na=False)) &
             (pd.to_numeric(df_anom_f[col_impact], errors='coerce').fillna(0) == 0)
         ]
-        for _, row in lignes_anom.iterrows():
+        for _, row in lignes_anormales.iterrows():
             id_val = row.get('ID Anomalie', row.get('id_anomalie', 'N/A'))
-            alertes.append(f"⚠️ Anomalie {id_val} sans impact financier")
+            alertes_qualite.append(
+                f"⚠️ Anomalie **{id_val}** [{row[col_crit]}] avec impact financier nul."
+            )
 
-    if alertes:
-        for a in alertes[:10]:  # Limiter à 10
-            st.warning(a)
+    if col_num_mis_m and not df_mis_f.empty:
+        for m_id in df_mis_f[col_num_mis_m].dropna().unique():
+            if "Une mission" in str(m_id) or str(m_id).startswith("N°"): continue
+            if df_pts.empty or col_num_mis_p not in df_pts.columns or m_id not in df_pts[col_num_mis_p].values:
+                alertes_qualite.append(f"❌ Mission **{m_id}** sans point de contrôle rattaché.")
+
+    if alertes_qualite:
+        for alerte in alertes_qualite: st.warning(alerte)
     else:
-        st.success("✅ Données validées")
+        st.success("✅ Diagnostic validé : Structure et intégrité OK.")
 
-    st.divider()
-    st.markdown("**📌 Registre complet (filtré) :**")
-    cols_diag = [c for c in [find_col(df_anom_f, "id_anom"), col_ctrl, col_ag_a, col_crit, col_domaine, col_impact, col_stat_a]
-                 if c and c in df_anom_f.columns]
-    if cols_diag:
-        st.dataframe(df_anom_f[cols_diag].sort_values(by=col_impact or df_anom_f.columns[0], ascending=False) 
-                    if col_impact and col_impact in df_anom_f.columns 
-                    else df_anom_f[cols_diag], 
-                    hide_index=True, use_container_width=True, height=400)
+with q2:
+    st.markdown("**📌 Registre des Anomalies (vue filtrée)**")
+    if not df_anom_f.empty:
+        cols_show = [c for c in [
+            find_col(df_anom_f, "id_anom"), col_crit, col_pays, col_ag_a,
+            next((c for c in df_anom_f.columns if 'Description' in c or 'description' in c), None),
+            col_impact, col_stat_a
+        ] if c and c in df_anom_f.columns]
+        sort_col = col_impact if col_impact and col_impact in df_anom_f.columns else df_anom_f.columns[0]
+        st.dataframe(
+            df_anom_f.sort_values(by=sort_col, ascending=False)[cols_show],
+            hide_index=True, use_container_width=True, height=300
+        )
     else:
-        st.dataframe(df_anom_f, hide_index=True, use_container_width=True, height=400)
+        st.info("Aucune anomalie à lister.")
 
-# ============================================================
-# FOOTER : EXPORT
-# ============================================================
 st.divider()
-st.markdown("### 📤 Export Fichier Maître")
 
-if st.button("🏗️ Générer le fichier consolidé", type="primary", use_container_width=True):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        # Métadonnées
+# ============================================================
+# EXPORTATION FICHIER MAÎTRE
+# ============================================================
+st.header("📤 Génération du Fichier Maître Consolidé")
+
+if st.button("🏗️ Compiler et figer le Fichier Maître Consolidé", type="primary", use_container_width=True):
+    output_buffer = io.BytesIO()
+    with pd.ExcelWriter(output_buffer, engine='xlsxwriter') as writer:
         df_meta = pd.DataFrame({
-            "RAPPORT": ["Destinataire", "Généré par", "Date", "Filtres", "Statut"],
-            "VALEURS": [
-                "Management",
-                "Dashboard SKAB",
-                datetime.now().strftime("%d/%m/%Y %H:%M"),
+            "RAPPORT GLOBAL CI SKAB": [
+                "Destinataire Principal","Généré par","Horodatage","Filtres appliqués","Niveau de validation"
+            ],
+            "MÉTADONNÉES": [
+                "M. Élie DIGNOU (DAF)",
+                "Chef de Département Contrôle Interne",
+                datetime.now().strftime("%d/%m/%Y à %H:%M"),
                 " | ".join(filtres_actifs) if filtres_actifs else "Aucun",
-                "VALIDÉ"
+                "VÉRIFIÉ ET SCELLÉ"
             ]
         })
-        df_meta.to_excel(writer, sheet_name="ACCUEIL", index=False)
+        df_meta.to_excel(writer, sheet_name="ACCUEIL_CONSO", index=False)
+        writer.sheets["ACCUEIL_CONSO"].set_column('A:B', 40)
 
-        # Onglets données
-        sheets = {
-            "MISSIONS": data["MISSIONS"],
-            "POINTS": data["POINTS"],
-            "ANOMALIES": data["ANOMALIES"],
-            "PLANS": data["PLANS"],
+        onglets = {
+            "CONSO_MISSIONS":       data["MISSIONS"],
+            "CONSO_POINTS_CTRL":    data["POINTS"],
+            "CONSO_ANOMALIES":      data["ANOMALIES"],
+            "CONSO_PLANS_ACTION":   data["PLANS"],
         }
 
+        # Onglet spécial EN COURS
         if col_stat_a and not df_anom.empty:
-            df_ec = df_anom[df_anom[col_stat_a].astype(str).str.upper().str.contains("EN COURS", na=False)]
-            if not df_ec.empty:
-                sheets["ANOMALIES_EN_COURS"] = df_ec
+            df_ec_export = df_anom[df_anom[col_stat_a].astype(str).str.upper().str.contains("EN COURS", na=False)]
+            if not df_ec_export.empty:
+                onglets["ANOMALIES_EN_COURS"] = df_ec_export
 
-        for name, df in sheets.items():
-            if df is not None and not df.empty:
-                df.to_excel(writer, sheet_name=name, index=False)
-                ws = writer.sheets[name]
-                for i, col in enumerate(df.columns):
-                    ws.set_column(i, i, get_safe_len(df[col], col))
+        for sheet_name, dataframe in onglets.items():
+            if dataframe is not None and not dataframe.empty:
+                dataframe.to_excel(writer, sheet_name=sheet_name, index=False)
+                ws = writer.sheets[sheet_name]
+                for i, col in enumerate(dataframe.columns):
+                    ws.set_column(i, i, get_safe_len(dataframe[col], col))
 
-    st.success("✅ Fichier généré !")
+    st.success("🎉 Fichier Maître structuré avec succès — onglet ANOMALIES_EN_COURS inclus !")
     st.download_button(
-        f"💾 SKAB_CONSOLIDÉ_{datetime.now().strftime('%Y%m%d')}.xlsx",
-        data=output.getvalue(),
-        file_name=f"SKAB_CONSOLIDÉ_{datetime.now().strftime('%Y%m%d')}.xlsx",
+        label=f"💾 Télécharger SKAB_MAITRE_CONSO_{datetime.now().strftime('%Y%m%d')}.xlsx",
+        data=output_buffer.getvalue(),
+        file_name=f"SKAB_MAITRE_CONSO_{datetime.now().strftime('%Y%m%d')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
 
-st.caption("© 2026 Groupe SKAB — Direction Audit & Contrôle Interne")
+st.markdown("---")
+st.caption("Direction Générale SKAB Nutrition — Application de Contrôle Interne — v2.0 Supabase")
