@@ -3,10 +3,9 @@ import pandas as pd
 import plotly.express as px
 import io
 import re
-import psycopg2  # Connecteur natif requis par Supabase
+import psycopg2  # Connecteur natif PostgreSQL
 from datetime import datetime
 from sqlalchemy import create_engine, text
-import urllib.parse  # Pour sécuriser les caractères spéciaux du mot de passe
 
 # --- CONFIGURATION DE LA PAGE ---
 st.set_page_config(
@@ -25,28 +24,16 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# --- 1. CONNEXION ROUTÉE VIA LE POOLER IPv4 DE SUPABASE ---
+# --- 1. CONNEXION SÉCURISÉE VIA LA CHAÎNE DIRECTE DU POOLER ---
 try:
-    # Paramètres de connexion officiels mis à jour pour contourner l'erreur IPv6 (Cannot assign requested address)
-    DB_HOST = "aws-0-eu-central-1.pooler.supabase.com"  # Hôte de transaction IPv4 stable
-    DB_PORT = "6543"                                    # Port dédié au pooler Supabase
-    DB_NAME = "postgres"
-    DB_USER = "postgres.fkqlhylqsyycaiuukewf"           # Format d'authentification du pooler
+    # Récupération de la chaîne complète stockée de manière étanche dans vos secrets Streamlit
+    DATABASE_URL = st.secrets["connections"]["supabase"]["DATABASE_URL"]
     
-    # Récupération sécurisée du mot de passe depuis vos Secrets Streamlit Cloud
-    DB_PASSWORD = st.secrets["connections"]["supabase"]["password"]
-    
-    # Sécurité : Encodage du mot de passe pour neutraliser les caractères spéciaux (@, #, /, etc.)
-    encoded_password = urllib.parse.quote_plus(DB_PASSWORD)
-    
-    # Construction de l'URI de connexion avec forçage du mode SSL
-    DATABASE_URL = f"postgresql://{DB_USER}:{encoded_password}@{DB_HOST}:{DB_PORT}/{DB_NAME}?sslmode=require"
-    
-    # Création de l'engine de persistance SQLAlchemy
-    engine = create_engine(DATABASE_URL)
+    # Création de l'engine avec le paramètre d'optimisation du pooler
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
     
 except Exception as e:
-    st.error("🔒 Configuration manquante : Assurez-vous d'avoir défini le 'password' dans vos Secrets Streamlit.")
+    st.error("🔒 Configuration manquante : Assurez-vous d'avoir défini la variable 'DATABASE_URL' dans vos Secrets Streamlit.")
     st.stop()
 
 
@@ -234,7 +221,7 @@ with tabs[0]:
 
 
 # ==============================================================================
-# ONGLET 2 : RESTITUTION ET RESTORATION DES METRICS
+# ONGLET 2 : RESTITUTION ET METRICS
 # ==============================================================================
 with tabs[1]:
     st.header("📊 Consolidation Automatique du Groupe")
