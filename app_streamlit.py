@@ -3,8 +3,10 @@ import pandas as pd
 import plotly.express as px
 import io
 import re
+import psycopg2  # Importation native demandée par Supabase
 from datetime import datetime
 from sqlalchemy import create_engine, text
+import urllib.parse  # Pour sécuriser les caractères spéciaux du mot de passe
 
 # --- CONFIGURATION DE LA PAGE ---
 st.set_page_config(
@@ -23,22 +25,31 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# --- 1. CONNEXION VIA L'URL DE LA BASE DE DONNÉES (DATABASE_URL) ---
+# --- 1. CONNEXION AVEC LES PARAMÈTRES EXPLICITES DE SUPABASE ---
 try:
-    # Récupération de l'URL complète depuis les Secrets de Streamlit
-    # Rôle 'postgres' (Super-utilisateur) configuré par défaut via les paramètres Supabase
-    DATABASE_URL = st.secrets["connections"]["supabase"]["DATABASE_URL"]
+    # Extraction des variables depuis vos secrets Streamlit
+    DB_HOST = "db.fkqlhylqsyycaiuukewf.supabase.co"
+    DB_PORT = "5432"
+    DB_NAME = "postgres"
+    DB_USER = "postgres"
+    DB_PASSWORD = st.secrets["connections"]["supabase"]["password"]
     
-    # Création de l'engine SQL basé sur le driver psycopg2 natif
+    # Sécurité critique : On encode le mot de passe pour éviter l'erreur "could not translate host name"
+    # si votre mot de passe contient un '@', '/', ou autre caractère spécial.
+    encoded_password = urllib.parse.quote_plus(DB_PASSWORD)
+    
+    # Assemblage de l'URL de l'Engine SQLAlchemy avec les paramètres isolés
+    DATABASE_URL = f"postgresql://{DB_USER}:{encoded_password}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
     engine = create_engine(DATABASE_URL)
+    
 except Exception as e:
-    st.error("🔒 Impossible de charger l'URL de la base de données. Assurez-vous d'avoir configuré 'DATABASE_URL' dans vos secrets Streamlit.")
+    st.error("🔒 Configuration manquante : Assurez-vous d'avoir défini le 'password' dans vos Secrets Streamlit.")
     st.stop()
 
 
-# --- 2. SCHÉMA INITIAL : CRÉATION FORCÉE EN CAS DE BASE VIERGE ---
+# --- 2. SÉCURITÉ : INITIALISATION DU SCHÉMA VIA PSYCOPG2 & SQLALCHEMY ---
 def force_init_supabase_schema(sql_engine):
-    """Garantit la création des structures physiques si elles sont absentes de la console"""
+    """Déclare explicitement les ordres DDL pour forcer la création physique des tables"""
     queries = [
         """
         CREATE TABLE IF NOT EXISTS table_anomalies (
@@ -82,11 +93,11 @@ def force_init_supabase_schema(sql_engine):
             trans.commit()
         except Exception as err:
             trans.rollback()
-            st.error(f"💥 Erreur lors de l'initialisation forcée des tables : {err}")
+            st.error(f"💥 Erreur lors de l'application de la structure SQL : {err}")
 
 
 def clean_column_name(col):
-    """Standardise les en-têtes de colonnes au format PostgreSQL (minuscules, sans caractères spéciaux)"""
+    """Standardise les en-têtes Excel au format compatible PostgreSQL"""
     s = str(col).strip().lower()
     s = s.replace("é", "e").replace("è", "e").replace("ê", "e").replace("à", "a").replace("ç", "c")
     s = re.sub(r"[/\-()°’'%]", " ", s)
@@ -94,7 +105,7 @@ def clean_column_name(col):
     return s.strip("_")
 
 def load_table_from_supabase(table_name):
-    """Charge de manière sécurisée une table sous forme de DataFrame pour les graphiques"""
+    """Récupère le contenu d'une table, retourne un DataFrame vide si la table est vierge"""
     try:
         with engine.connect() as read_conn:
             return pd.read_sql_query(text(f"SELECT * FROM {table_name};"), read_conn)
@@ -102,9 +113,9 @@ def load_table_from_supabase(table_name):
         return pd.DataFrame()
 
 
-# --- 3. ARCHITECTURE DE L'APPLICATION ---
+# --- 3. INTERFACE DE LA CONSOLE ---
 st.title("🛡️ SKAB NUTRITION — Console de Supervision du Contrôle Interne")
-st.caption("Espace d'administration centralisé - Réservé au Chef de Département")
+st.caption("Système d'administration cloud — Connecté à l'instance db.fkqlhylqsyycaiuukewf.supabase.co")
 
 tabs = st.tabs([
     "📥 Injection des Livrables", 
@@ -114,13 +125,13 @@ tabs = st.tabs([
 
 
 # ==============================================================================
-# ONGLET 1 : INJECTION SÉCURISÉE DEPUIS EXCEL
+# ONGLET 1 : IMPORTATION DES CLASSEURS EXCEL
 # ==============================================================================
 with tabs[0]:
     st.header("🗂️ Centralisation et Structuration des rapports terrains")
     st.markdown("""
-        Déposez le classeur Excel d'un contrôleur. Le système va automatiquement se connecter à votre URI Supabase,
-        vérifier les structures et pousser les nouvelles données.
+        Déposez le classeur Excel d'un contrôleur. L'application va valider la structure des données,
+        vérifier l'existence des tables sur votre serveur **Supabase** et y pousser les lignes.
     """)
     
     src_file = st.file_uploader("Sélectionnez le fichier Excel à intégrer (.xlsx) :", type="xlsx")
@@ -137,22 +148,22 @@ with tabs[0]:
             excel_obj = pd.ExcelFile(src_file)
             available_sheets = excel_obj.sheet_names
             
-            st.info(f"📁 Fichier détecté : `{src_file.name}` (Onglets présents : {', '.join(available_sheets)})")
+            st.info(f"📁 Fichier chargé : `{src_file.name}` (Onglets détectés : {', '.join(available_sheets)})")
             
             mode_import = st.radio(
-                "Stratégie de stockage dans Supabase :",
+                "Option d'écriture dans la base :",
                 [
-                    "Ajouter les données à la suite de l'historique existant",
-                    "⚠️ Vider la base et réinitialiser toutes les tables à neuf (Purge complète)"
+                    "Ajouter les lignes à la suite de l'historique global",
+                    "⚠️ Vider les tables existantes et réinsérer uniquement ce fichier (Purge)"
                 ]
             )
             
-            if st.button("🚀 Lancer la synchronisation globale des tables", type="primary", use_container_width=True):
+            if st.button("🚀 Valider et injecter dans la table Supabase", type="primary", use_container_width=True):
                 
-                # 🚀 FORCE SYNC SCHEMA : On crée les tables si la base est vide
+                # ⚙️ ORDRE CRITIQUE : Crée physiquement les tables si Supabase est vide
                 force_init_supabase_schema(engine)
                 
-                # Optionnel : Vidage du contenu existant
+                # Gestion du TRUNCATE si demandé
                 if "Vider" in mode_import:
                     with engine.connect() as clear_conn:
                         trans = clear_conn.begin()
@@ -160,7 +171,7 @@ with tabs[0]:
                             for db_table in target_sheets.values():
                                 clear_conn.execute(text(f"TRUNCATE TABLE {db_table};"))
                             trans.commit()
-                            st.warning("🗑️ Base de données vidée (Structures conservées). Remplissage en cours...")
+                            st.warning("🗑️ Base nettoyée avec succès. Début du transfert des lignes...")
                         except Exception:
                             trans.rollback()
                 
@@ -187,11 +198,11 @@ with tabs[0]:
                             df_clean = df_clean.dropna(subset=[first_col])
                             df_clean = df_clean[~df_clean[first_col].astype(str).str.contains("une_anomalie|id_anomalie|exemple", na=False, case=False)]
                             
-                            # Métadonnées d'administration
+                            # Ajout des métadonnées obligatoires
                             df_clean['meta_source_file'] = src_file.name
                             df_clean['meta_import_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             
-                            # Alignement parfait du DataFrame sur le schéma réel
+                            # Réalignement structurel
                             with engine.connect() as col_conn:
                                 query_cols = pd.read_sql_query(text(f"SELECT * FROM {db_table} LIMIT 0;"), col_conn)
                             
@@ -201,25 +212,25 @@ with tabs[0]:
                                     df_clean[c] = None
                             df_clean = df_clean[db_cols]
                             
-                            # Insertion via l'engine direct alimenté par DATABASE_URL
+                            # Écriture finale vers PostgreSQL
                             with engine.connect() as write_conn:
                                 df_clean.to_sql(db_table, con=write_conn, if_exists="append", index=False)
                             
-                            st.caption(f"✅ Synchro réussie pour `{db_table}` ({df_clean.shape[0]} lignes insérées).")
+                            st.caption(f"✅ Table `{db_table}` mise à jour ({df_clean.shape[0]} lignes transférées).")
                             success_count += 1
                     
                     progress_bar.progress((idx + 1) / len(target_sheets))
                 
                 if success_count > 0:
-                    st.success(f"🎉 Les données ont été packagées et injectées avec succès sur Supabase via l'URL administrative !")
+                    st.success(f"🎉 Synchronisation validée ! Vos tables sont créées et alimentées sur Supabase.")
                     st.balloons()
                     
         except Exception as ex:
-            st.error(f"❌ Échec de l'intégration : {ex}")
+            st.error(f"❌ Erreur lors de l'analyse ou du transfert SQL : {ex}")
 
 
 # ==============================================================================
-# ONGLET 2 : TABLEAUX DE BORD (CONSOLIDATION RAPIDE)
+# ONGLET 2 : ANALYSE ET GRAPHIQUES (RESTITUTION)
 # ==============================================================================
 with tabs[1]:
     st.header("📊 Consolidation Automatique du Groupe")
@@ -227,62 +238,58 @@ with tabs[1]:
     df_anom = load_table_from_supabase("table_anomalies")
     
     if df_anom.empty:
-        st.warning("💡 En attente d'un premier fichier d'importation pour générer les indicateurs Groupe.")
+        st.warning("💡 Aucune donnée disponible en ligne. Injectez un premier livrable pour activer le tableau de bord.")
     else:
         df_anom.columns = [c.lower() for c in df_anom.columns]
         
-        c_site = next((c for c in df_anom.columns if 'site' in c or 'entite' in c), df_anom.columns[2])
         c_impact = next((c for c in df_anom.columns if 'impact' in c), None)
         c_crit = next((c for c in df_anom.columns if 'crit' in c), None)
         c_pays = next((c for c in df_anom.columns if 'pays' in c), None)
         c_statut = next((c for c in df_anom.columns if 'statut' in c), None)
 
         liste_pays = ["Toutes les filiales"] + list(df_anom[c_pays].dropna().unique()) if c_pays else ["Toutes les filiales"]
-        pays_selectionne = st.selectbox("🌍 Filtrer par filiale :", liste_pays)
+        pays_selectionne = st.selectbox("🌍 Filtrer par filiale géographique :", liste_pays)
         
         if pays_selectionne != "Toutes les filiales" and c_pays:
             df_anom = df_anom[df_anom[c_pays] == pays_selectionne]
 
-        st.markdown("### 📌 Indicateurs Majeurs du Groupe")
+        st.markdown("### 📌 Indicateurs Financiers et Opérationnels")
         k1, k2, k3, k4 = st.columns(4)
         with k1:
             impact_total = pd.to_numeric(df_anom[c_impact], errors='coerce').fillna(0).sum() if c_impact else 0
-            st.metric("Risque Financier Global", f"{impact_total:,.0f} FCFA")
+            st.metric("Risque Financier Cumulé", f"{impact_total:,.0f} FCFA")
         with k2:
             nb_crit = df_anom[df_anom[c_crit].astype(str).str.contains('critique|🔴', na=False, case=False)].shape[0] if c_crit else 0
             st.metric("Alertes Critiques", nb_crit)
         with k3:
             nb_encours = df_anom[df_anom[c_statut].astype(str).str.upper().str.contains("EN COURS|OUVERT", na=False)].shape[0] if c_statut else 0
-            st.metric("Anomalies en cours", nb_encours)
+            st.metric("Anomalies Non Clôturées", nb_encours)
         with k4:
-            st.metric("Écarts Totaux Répertoriés", df_anom.shape[0])
+            st.metric("Total Lignes Traitées", df_anom.shape[0])
 
         st.divider()
-        st.markdown("### 📋 Registre d'Audit Consolidé")
         st.dataframe(df_anom, hide_index=True, use_container_width=True)
 
 
 # ==============================================================================
-# ONGLET 3 : CONSOLE DE REQUÊTAGE DIRECTE POSTGRESQL
+# ONGLET 3 : MONITORING ET REQUÊTES DIRECTES
 # ==============================================================================
 with tabs[2]:
-    st.header("🔍 Console SQL native (Accès direct Supabase)")
-    st.markdown("Exécutez vos requêtes analytiques sur vos tables consolides.")
+    st.header("🔍 Console SQL native (Vérification en temps réel)")
+    st.markdown("Saisissez une requête PostgreSQL standard pour auditer le contenu brut de vos tables.")
     
-    st.subheader("🖋️ Éditeur de requêtes PostgreSQL")
-    ex_query = "SELECT * FROM table_anomalies LIMIT 10;"
-    user_sql = st.text_area("Saisir la requête SQL :", value=ex_query, height=120)
+    user_sql = st.text_area("Requête PostgreSQL :", value="SELECT table_name FROM information_schema.tables WHERE table_schema='public';", height=100)
     
-    if st.button("⚡ Exécuter la requête", type="primary"):
+    if st.button("⚡ Exécuter l'analyse SQL", type="primary"):
         if user_sql.strip():
             try:
                 with engine.connect() as query_conn:
                     result_sql = query_conn.execute(text(user_sql))
                     if result_sql.returns_rows:
                         df_query_res = pd.DataFrame(result_sql.fetchall(), columns=result_sql.keys())
-                        st.success(f"🎯 Requête exécutée. {df_query_res.shape[0]} lignes trouvées.")
+                        st.success(f"🎯 Requête réussie. {df_query_res.shape[0]} lignes renvoyées.")
                         st.dataframe(df_query_res, use_container_width=True)
                     else:
-                        st.success("✅ Commande de modification exécutée avec succès sur le serveur.")
+                        st.success("✅ Script exécuté avec succès.")
             except Exception as sql_err:
-                st.error(f"❌ Erreur SQL renvoyée par Supabase : {sql_err}")
+                st.error(f"❌ Retour du serveur Supabase : {sql_err}")
