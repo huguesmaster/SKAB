@@ -62,29 +62,67 @@ except Exception:
 # ============================================================
 # MOTEUR DE LECTURE DES FICHIERS EXCEL
 # ============================================================
-def load_and_clean(file, sheet):
+def get_available_sheets(file):
+    """Retourne la liste des feuilles disponibles dans le classeur."""
     try:
+        xls = pd.ExcelFile(file)
+        return xls.sheet_names
+    except Exception:
+        return []
+
+
+def find_sheet_containing_keyword(file, keywords):
+    """Cherche la première feuille contenant l'un des mots-clés dans ses colonnes."""
+    sheet_names = get_available_sheets(file)
+    for sheet in sheet_names:
+        try:
+            df_test = pd.read_excel(file, sheet_name=sheet, header=None, nrows=20)
+            df_str = df_test.astype(str).values.flatten()
+            if any(keyword in cell for cell in df_str for keyword in keywords):
+                return sheet
+        except Exception:
+            continue
+    return None
+
+
+def load_and_clean(file, keywords, sheet=None):
+    """
+    Charge et nettoie les données depuis une feuille Excel.
+    Si `sheet` est None, cherche automatiquement la feuille contenant les keywords.
+    """
+    try:
+        # Si aucune feuille n'est spécifiée, la chercher automatiquement
+        if sheet is None:
+            sheet = find_sheet_containing_keyword(file, keywords)
+            if sheet is None:
+                return pd.DataFrame()
+        
+        # Essayer de lire la feuille
+        file.seek(0)
         df_raw = pd.read_excel(file, sheet_name=sheet, header=None)
+        
         if df_raw.empty:
             return pd.DataFrame()
 
+        # Chercher la ligne d'en-tête
         header_idx = None
         for idx, row in df_raw.iterrows():
             row_str = [str(val).strip() for val in row.values]
-            if sheet == "MES_MISSIONS"     and any("N° Mission"  in s for s in row_str): header_idx = idx; break
-            elif sheet == "POINTS_CONTROLE"  and any("ID Point"    in s for s in row_str): header_idx = idx; break
-            elif sheet == "ANOMALIES"        and any("ID Anomalie" in s for s in row_str): header_idx = idx; break
-            elif sheet == "PLANS_ACTION"     and any("ID Plan"     in s for s in row_str): header_idx = idx; break
+            if any(keyword in cell for cell in row_str for keyword in keywords):
+                header_idx = idx
+                break
 
         if header_idx is None:
             for idx, row in df_raw.iterrows():
                 row_str = [str(val).strip() for val in row.values]
                 if any("ID" in s or "N°" in s or "Code" in s for s in row_str):
-                    header_idx = idx; break
+                    header_idx = idx
+                    break
 
         if header_idx is None:
             header_idx = 0
 
+        file.seek(0)
         df = pd.read_excel(file, sheet_name=sheet, skiprows=header_idx)
         df.columns = [str(c).strip() for c in df.columns]
         df = df.dropna(subset=[df.columns[0]]) if not df.empty else df
@@ -97,17 +135,34 @@ def load_and_clean(file, sheet):
             df['Fichier Source'] = file.name
 
         return df
-    except Exception:
+    except Exception as e:
         return pd.DataFrame()
 
 
 def process_consolidation(files):
+    """Consolide les données de tous les fichiers uploadés."""
     all_data = {"MISSIONS": [], "POINTS": [], "ANOMALIES": [], "PLANS": []}
+    
     for f in files:
-        f.seek(0); all_data["MISSIONS"].append(load_and_clean(f, "MES_MISSIONS"))
-        f.seek(0); all_data["POINTS"].append(load_and_clean(f, "POINTS_CONTROLE"))
-        f.seek(0); all_data["ANOMALIES"].append(load_and_clean(f, "ANOMALIES"))
-        f.seek(0); all_data["PLANS"].append(load_and_clean(f, "PLANS_ACTION"))
+        # Missions
+        df_missions = load_and_clean(f, ["N° Mission", "Mission"])
+        if not df_missions.empty:
+            all_data["MISSIONS"].append(df_missions)
+        
+        # Points de contrôle
+        df_points = load_and_clean(f, ["ID Point", "Point de Contrôle"])
+        if not df_points.empty:
+            all_data["POINTS"].append(df_points)
+        
+        # Anomalies
+        df_anomalies = load_and_clean(f, ["ID Anomalie", "Anomalie"])
+        if not df_anomalies.empty:
+            all_data["ANOMALIES"].append(df_anomalies)
+        
+        # Plans d'action
+        df_plans = load_and_clean(f, ["ID Plan", "Plan"])
+        if not df_plans.empty:
+            all_data["PLANS"].append(df_plans)
 
     return {k: pd.concat(v, ignore_index=True) if v else pd.DataFrame()
             for k, v in all_data.items()}
