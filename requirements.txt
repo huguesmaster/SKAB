@@ -1,1 +1,7 @@
-
+streamlit
+pandas
+plotly
+openpyxl
+xlsxwriter
+psycopg2-binary
+SQLAlchemy
