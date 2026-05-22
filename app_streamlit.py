@@ -35,17 +35,13 @@ except Exception as e:
     st.stop()
 
 
-# --- 2. FONCTION DE NETTOYAGE CORRIGÉE (ANTI-SYNTAX ERROR) ---
+# --- 2. FONCTION DE NETTOYAGE UNIQUE (COMMUNE EXCEL & FORMULAIRE) ---
 def clean_column_name(col):
-    """Nettoie proprement les en-têtes Excel pour PostgreSQL sans générer de conflits '___'"""
+    """Nettoie proprement les en-têtes pour PostgreSQL (pas d'accents, espaces ou caractères spéciaux doublés)"""
     s = str(col).strip().lower()
-    # Remplacement des accents courants
     s = s.replace("é", "e").replace("è", "e").replace("ê", "e").replace("à", "a").replace("ç", "c")
-    # Remplacement des caractères spéciaux, slashs, parenthèses et espaces par un seul espace
-    s = re.sub(r"[/\-()°’']", " ", s)
-    # Remplacement des espaces multiples par un seul underscore
-    s = re.sub(r"\s+", "_", s)
-    # Nettoyage des underscores aux extrémités
+    s = re.sub(r"[/\-()°’']", " ", s)  # Remplace les séparateurs par des espaces
+    s = re.sub(r"\s+", "_", s)         # Remplace les espaces multiples par un seul underscore
     return s.strip("_")
 
 
@@ -67,7 +63,7 @@ def get_safe_len(series, col_name):
     return min(max(max_c, len(str(col_name))) + 3, 50)
 
 
-# --- 3. SEPARATION DES WORKFLOWS SKAB ---
+# --- 3. ARCHITECTURE DES ONGLETS SKAB ---
 tab_chef, tab_terrain = st.tabs([
     "📊 ESPACE CHEF DE DÉPARTEMENT (Supervision & Conso)", 
     "📥 ESPACE CONTRÔLEURS TERRAINS (Saisie Directe & Injection)"
@@ -88,7 +84,7 @@ with tab_chef:
     else:
         df_anom.columns = [str(c).lower().strip() for c in df_anom.columns]
         
-        # Mappings des colonnes basés sur le nouveau nettoyage propre
+        # Mappings des colonnes basés sur le nettoyage standardisé
         c_site = next((c for c in df_anom.columns if 'site' in c or 'entite' in c or 'agence' in c), df_anom.columns[2])
         c_date = next((c for c in df_anom.columns if 'date' in c), df_anom.columns[1])
         c_impact = next((c for c in df_anom.columns if 'impact' in c), None)
@@ -157,7 +153,7 @@ with tab_chef:
                 fig2.update_layout(height=320, margin=dict(l=0, r=0, t=10, b=0))
                 st.plotly_chart(fig2, use_container_width=True)
 
-        # Affichage ciblé des éléments "EN COURS"
+        # Affichage ciblé "EN COURS"
         st.divider()
         st.markdown("### ⏳ Focus Exclusif sur les Incidents au Statut ''EN COURS''")
         if c_statut:
@@ -170,7 +166,7 @@ with tab_chef:
         st.markdown("### 📋 Registre Global des Données")
         st.dataframe(df_anom, hide_index=True, use_container_width=True)
 
-        # Bouton d'export pour le DAF
+        # Export DAF
         st.divider()
         st.header("📤 Finalisation et Rapport pour le DAF")
         if st.button("🏗️ Compiler le Fichier Maître Unique pour M. Élie DIGNOU (DAF)", type="primary", use_container_width=True):
@@ -219,10 +215,10 @@ with tab_terrain:
             if df_to_inject.empty:
                 st.error("⚠️ Le fichier chargé ne contient aucune ligne de données valides.")
             else:
-                # Application de la fonction de nettoyage robuste (Supprime le risque de syntaxe SQL)
+                # Nettoyage uniforme des colonnes du fichier Excel
                 df_to_inject.columns = [clean_column_name(c) for c in df_to_inject.columns]
                 
-                # Nettoyage des lignes de consignes
+                # Nettoyage des consignes textuelles
                 df_to_inject = df_to_inject.dropna(subset=[df_to_inject.columns[0]])
                 df_to_inject = df_to_inject[~df_to_inject[df_to_inject.columns[0]].astype(str).str.contains("une_anomalie|id_anomalie", na=False, case=False)]
                 
@@ -246,16 +242,15 @@ with tab_terrain:
 
                 if st.button("🚀 Synchroniser le fichier avec Supabase", type="primary"):
                     df_to_inject.to_sql("anomalies", con=engine, if_exists=if_exists_param, index=False)
-                    st.success(f"🔥 Opération réussie ! Les données sont désormais sauvegardées de façon sécurisée dans Supabase.")
+                    st.success(f"🔥 Opération réussie ! Les données Excel sont synchronisées dans Supabase.")
                     st.balloons()
                     
         except Exception as err:
-            st.error("❌ Une erreur est survenue lors de la tentative de synchronisation.")
-            st.info("Vérifiez l'état de votre connexion Supabase et l'intégrité de l'onglet 'ANOMALIES' de votre fichier.")
+            st.error("❌ Une erreur est survenue lors de la synchronisation de l'Excel.")
 
     st.divider()
 
-    # MÉTHODE 2 : FORMULAIRE WEB DIRECT
+    # MÉTHODE 2 : FORMULAIRE WEB DIRECT CORRIGÉ
     st.markdown("#### 📝 Méthode 2 : Formulaire de Saisie Directe à la volée (Sans fichier)")
     with st.form("form_saisie_directe"):
         c1, c2, c3 = st.columns(3)
@@ -281,16 +276,30 @@ with tab_terrain:
             if len(f_id) <= 10 or not f_site or not f_desc:
                 st.error("⚠️ Veuillez remplir tous les champs obligatoires marqués d'un astérisque (*).")
             else:
-                dict_form = {
-                    "id_anomalie": [f_id], "date_detection": [str(f_date)], "site_entite": [f_site],
-                    "pays": [f_pays], "type_domaine": [f_domaine], "niveau_criticité": [f_crit],
-                    "description": [f_desc], "cause_racine_identifiee": [f_cause], "impact_estime_fcfa": [f_impact],
-                    "responsable_traitement": [f_resp], "statut": [f_statut], "fichier_source": ["Formulaire Web Direct"],
-                    "date_saisie_base": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
+                # 💡 LE FIX GLOBAL : On crée le dictionnaire avec les clés Excel exactes 
+                # et on leur applique DIRECTEMENT la fonction clean_column_name() !
+                raw_form_data = {
+                    "ID Anomalie": [f_id], 
+                    "Date détection": [str(f_date)], 
+                    "Site / Entité": [f_site],
+                    "Pays": [f_pays], 
+                    "Type / Domaine": [f_domaine], 
+                    "Niveau criticité": [f_crit],
+                    "Description": [f_desc], 
+                    "Cause racine identifiée": [f_cause], 
+                    "Impact estimé (FCFA)": [f_impact],
+                    "Responsable traitement": [f_resp], 
+                    "Statut": [f_statut], 
+                    "Fichier Source": ["Formulaire Web Direct"],
+                    "Date Saisie Base": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
                 }
-                df_form = pd.DataFrame(dict_form)
+                
+                # Conversion en DataFrame et application du même nettoyage strict des colonnes
+                df_form = pd.DataFrame(raw_form_data)
+                df_form.columns = [clean_column_name(c) for c in df_form.columns]
+                
                 try:
                     df_form.to_sql("anomalies", con=engine, if_exists="append", index=False)
-                    st.success(f"🔥 Enregistrement validé ! L'anomalie **{f_id}** a été poussée dans Supabase.")
-                except Exception:
-                    st.error("⚠️ Impossible d'insérer via le formulaire. Assurez-vous d'avoir exécuté l'initialisation de la table au moins une fois via la Méthode 1.")
+                    st.success(f"🔥 Enregistrement validé ! L'anomalie **{f_id}** a été poussée proprement dans Supabase.")
+                except Exception as ex:
+                    st.error("⚠️ Échec de l'insertion. Assurez-vous d'avoir initialisé la structure de la table au moins une fois via l'import de fichier (Méthode 1).")
